@@ -1,4 +1,5 @@
 import time
+from pathlib import Path
 
 import casadi
 import meshcat.geometry as mg
@@ -9,6 +10,7 @@ from pinocchio.visualize import MeshcatVisualizer
 
 from unitree_deploy.utils.weighted_moving_filter import WeightedMovingFilter
 
+ASSETS_DIR = Path(__file__).resolve().parents[1] / "assets" / "z1"
 
 class Z1_Arm_IK:
     def __init__(self, unit_test=False, visualization=False):
@@ -18,7 +20,7 @@ class Z1_Arm_IK:
         self.visualization = visualization
 
         self.robot = pin.RobotWrapper.BuildFromURDF(
-            "unitree_deploy/robot_devices/assets/z1/z1.urdf", "unitree_deploy/robot_devices/assets/z1/"
+            str(ASSETS_DIR / "z1.urdf"), str(ASSETS_DIR)
         )
         self.mixed_jointsToLockIDs = ["base_static_joint"]
 
