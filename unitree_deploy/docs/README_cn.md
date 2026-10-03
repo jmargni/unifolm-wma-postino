@@ -2,6 +2,8 @@
 
 本文档提供了为 Unitree G1 和 Z1 平台设置部署环境的说明，包括依赖安装、图像服务启动和夹爪控制。
 
+> **无机器人时：** [scripts/README.md](../scripts/README.md)（英文）说明了如何在笔记本电脑上让 G1 客户端连接模拟机器人，或带相机的 MuJoCo 物理仿真（`scripts/sim_g1_robot.py`）。[`setup_env.sh`](../setup_env.sh) 以固定版本搭建环境（见 [README_REPRODUCE.md](../../README_REPRODUCE.md)，英文）。
+
 # 0. 📖 简介
 
 此代码库用于 Unitree 机器人模型的部署。

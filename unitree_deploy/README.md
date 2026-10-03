@@ -10,6 +10,8 @@
 
 This document provides instructions for setting up the deployment environment for Unitree G1 (with gripper) and Z1 platforms, including dependency installation, image service startup, and gripper control.
 
+> **Without a robot:** [scripts/README.md](scripts/README.md) explains how to run the G1 client on a laptop against a mock robot or a MuJoCo physics simulation with cameras (`scripts/sim_g1_robot.py`). [`setup_env.sh`](setup_env.sh) builds the environment with pinned versions (see [README_REPRODUCE.md](../README_REPRODUCE.md)).
+
 # 0. 📖 Introduction
 
 This repository is used for model deployment with Unitree robots.

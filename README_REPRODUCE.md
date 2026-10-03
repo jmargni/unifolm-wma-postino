@@ -37,7 +37,9 @@ Unitree's code is at commit `3e198de` of
 | `unitree_deploy/unitree_deploy/robot_devices/arm/g1_arm_ik.py`, `z1_arm_ik.py` | Robot model files are found regardless of the folder you start from. |
 | `unitree_deploy/scripts/mock_g1_robot.py` | New: fake G1 robot. |
 | `unitree_deploy/scripts/mock_policy_server.py` | New: fake model server. |
-| `unitree_deploy/scripts/README.md` | New: how to run the client and the mocks. |
+| `unitree_deploy/scripts/sim_g1_robot.py` | New: physics simulation of the G1 with grippers, cameras and a table scene (MuJoCo). |
+| `unitree_deploy/unitree_deploy/robot_devices/cameras/imageclient.py` | The camera server address can be set with the `UNITREE_IMAGE_SERVER` environment variable (default: the real robot, `192.168.123.164`). |
+| `unitree_deploy/scripts/README.md` | New: how to run the client, the mocks and the simulator. |
 | `unitree_deploy/setup_env.sh` | New: builds the environment. |
 | `unitree_deploy/constraints.txt` | New: exact versions of all Python packages of the working environment. |
 | `README_REPRODUCE.md` | New: this file. |
@@ -217,6 +219,19 @@ The client must print `All Device Connect Success` and then
 `>>> Exec => step N action: [...]` lines. Details and examples are in
 [`unitree_deploy/scripts/README.md`](unitree_deploy/scripts/README.md).
 
+To check the physics simulator with cameras instead of the mock robot, replace
+terminals 1 and 3 with:
+
+```bash
+python sim_g1_robot.py                                   # terminal 1
+UNITREE_IMAGE_SERVER=127.0.0.1 python robot_client.py    # terminal 3
+```
+
+The simulator prints `real-time x1.00` every 2 seconds, and the mock server
+prints `has content` (not `all black`) for each request. The camera rendering
+needs OpenGL with EGL, which the graphics drivers of a normal Ubuntu desktop
+provide.
+
 ---
 
 ## 4. Keeping it reproducible
@@ -250,5 +265,6 @@ The client must print `All Device Connect Success` and then
 - **The real model server** (`scripts/evaluation/real_eval_server.py`): needs an
   NVIDIA GPU, a second environment and the checkpoint. Follow the main
   `README.md`.
-- **The real robot or the simulator:** network set-up and access are specific to
-  each site.
+- **The real robot or a remote simulator** (such as the lab's digital twin):
+  network set-up and access are specific to each site. The local simulator
+  `sim_g1_robot.py` is covered in section 3.4.

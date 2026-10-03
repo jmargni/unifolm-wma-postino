@@ -205,6 +205,8 @@ cd unitree_deploy
 python scripts/robot_client.py --robot_type "g1_dex1" --action_horizon 16 --exe_steps 16 --observation_horizon 2 --language_instruction "pack black camera into box" --output_dir ./results --control_freq 15
 ```
 
+> **Testing without a robot or a GPU:** [unitree_deploy/scripts/README.md](unitree_deploy/scripts/README.md) explains how to run `robot_client.py` against a mock model server and either a mock G1 or a MuJoCo physics simulation of the G1 with cameras (`sim_g1_robot.py`). [README_REPRODUCE.md](README_REPRODUCE.md) explains how to build the environment.
+
 ## 📝 Codebase Architecture
 Here's a high-level overview of the project's code structure and core components:
 ```

@@ -202,6 +202,8 @@ cd unitree_deploy
 python scripts/robot_client.py --robot_type "g1_dex1" --action_horizon 16 --exe_steps 16 --observation_horizon 2 --language_instruction "pack black camera into box" --output_dir ./results --control_freq 15
 ```
 
+> **无机器人、无 GPU 的本地测试：** [unitree_deploy/scripts/README.md](unitree_deploy/scripts/README.md)（英文）说明了如何让 `robot_client.py` 连接模拟的模型服务器，以及模拟的 G1 或带相机的 MuJoCo 物理仿真 G1（`sim_g1_robot.py`）。环境搭建见 [README_REPRODUCE.md](README_REPRODUCE.md)（英文）。
+
 ## 📝 代码架构
 以下是本项目代码结构设计及核心组件说明：：
 ```
