@@ -28,7 +28,11 @@ BASE_URL = f"http://{HOST}:{PORT}"
 
 # fmt: off
 INIT_POSE = {
-    'g1_dex1': np.array([0.10559805, 0.02726714, -0.01210221, -0.33341318, -0.22513399, -0.02627627, -0.15437093,  0.1273793 , -0.1674708 , -0.11544029, -0.40095493,  0.44332668,  0.11566751,  0.3936641, 5.4, 5.4], dtype=np.float32),
+    # Starting state of the "pack camera" training episode
+    # (examples/world_model_interaction_prompts/transitions/unitree_g1_pack_camera/0.h5, observation.state[0]),
+    # so the robot starts in a pose the model has seen. Unitree's original value:
+    # [0.10559805, 0.02726714, -0.01210221, -0.33341318, -0.22513399, -0.02627627, -0.15437093,  0.1273793 , -0.1674708 , -0.11544029, -0.40095493,  0.44332668,  0.11566751,  0.3936641, 5.4, 5.4]
+    'g1_dex1': np.array([-0.50163078, 0.32051945, 0.18178487, 0.6838522, -0.085745335, -0.51033354, -0.25062084, -0.40424705, -0.26256371, -0.20069599, 0.21123028, 0.1912303, -0.20726478, 0.28874797, 5.4340272, 5.378758], dtype=np.float32),
     'z1_dual_dex1_realsense': np.array([-1.0262332,  1.4281361, -1.2149128,  0.6473399, -0.12425245, 0.44945636,  0.89584476,  1.2593982, -1.0737865,  0.6672816, 0.39730102, -0.47400007, 0.9894176, 0.9817477 ], dtype=np.float32),
     'z1_realsense': np.array([-0.06940782, 1.4751548, -0.7554075, 1.0501366, 0.02931615, -0.02810347, -0.99238837], dtype=np.float32),
 }
@@ -49,8 +53,9 @@ def prepare_observation(args: argparse.Namespace, obs: Any) -> OrderedDict:
     """
     Convert a raw env observation into the model's expected input dict.
     """
-    rgb_image = cv2.cvtColor(
-        obs.observation["images"][CAM_KEY[args.robot_type]], cv2.COLOR_BGR2RGB)
+    # UnitreeEnv already converts the camera images from BGR to RGB; converting again here
+    # would swap red and blue back before the image reaches the model.
+    rgb_image = np.ascontiguousarray(obs.observation["images"][CAM_KEY[args.robot_type]])
     observation = {
         "observation.images.top":
         torch.from_numpy(rgb_image).permute(2, 0, 1),
