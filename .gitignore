@@ -63,6 +63,8 @@ db.sqlite3
 instance/
 .webassets-cache
 
+.idea
+
 # Scrapy stuff:
 .scrapy
 
