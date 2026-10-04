@@ -197,8 +197,9 @@ bash scripts/run_real_eval_server.sh
 - **Step-1**: Follow the instructions in [unitree_deploy/README.md](https://github.com/unitreerobotics/unifolm-world-model-action/blob/main/unitree_deploy/README.md) to create the ```unitree_deploy``` conda environment, install the required packages, launch the controllers or services on the real-robot.
 - **Step-2**: Open a new terminal and establish a tunnel connection from the client to the server:
 ```
-ssh user_name@remote_server_IP -CNg -L 8000:127.0.0.1:8000
+ssh user_name@remote_server_IP -CN -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ExitOnForwardFailure=yes -L 8000:127.0.0.1:8000
 ```
+  The `ServerAlive` options make the tunnel exit when its connection dies, instead of hanging silently; start it again if it exits. See [README_EC2.md](README_EC2.md), section 5.
 - **Step-3**: Run the ```unitree_deploy/robot_client.py``` script to start inference:
 ```
 cd unitree_deploy

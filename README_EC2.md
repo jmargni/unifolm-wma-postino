@@ -240,11 +240,30 @@ request, and saves the video the model imagines for each request in
 Open the SSH tunnel in its own terminal and leave it open:
 
 ```bash
-ssh -i ~/.ssh/unifolm-ec2.pem -CNg -L 8000:127.0.0.1:8000 ubuntu@EC2_IP
+ssh -i ~/.ssh/unifolm-ec2.pem -N \
+    -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ExitOnForwardFailure=yes \
+    -L 8000:127.0.0.1:8000 ubuntu@EC2_IP
 ```
 
 The command prints nothing and does not return: that is normal. While it runs,
 `127.0.0.1:8000` on the laptop is the model server on EC2.
+
+The three `-o` options keep the tunnel honest:
+
+- `ServerAliveInterval=15` and `ServerAliveCountMax=3`: SSH checks the
+  connection every 15 s and **exits** after 45 s without an answer. Without
+  them, a connection that dies (Wi-Fi change, laptop sleep, router timeout)
+  can leave a tunnel that still listens on port 8000 but never answers, so the
+  client waits forever. With them, the tunnel command ends and you know to
+  start it again.
+- `ExitOnForwardFailure=yes`: if port 8000 is already taken, SSH stops with an
+  error instead of running without a tunnel.
+
+To check that the tunnel works, in another terminal:
+
+```bash
+curl -s -m 10 -o /dev/null -w "%{http_code}\n" http://127.0.0.1:8000/docs   # 200 = OK
+```
 
 **Do not run `mock_policy_server.py` at the same time**: it uses the same port
 8000 and the tunnel would fail with "Address already in use".
@@ -350,5 +369,7 @@ an e-mail alert.
 | Server start takes very long, disk busy | Loading is using the swap file. | Normal on `g5.2xlarge`; it only happens at start-up. |
 | Server error mentioning `/path/to/...` | A placeholder path is left. | Section 3.5. |
 | Laptop request: `Connection refused` | Tunnel not open, or server not ready yet. | Check the tunnel terminal; on EC2, `tmux attach -t model` and wait for "Inference server is ready". |
+| Client hangs, the server prints nothing, and the `curl` check of section 5 prints `000` | The tunnel's connection died but the tunnel still listens (started without the keep-alive options). | Stop the tunnel (`Ctrl+C`) and start it again with the command of section 5. |
+| Tunnel command ends by itself with `Timeout, server ... not responding` | The keep-alive detected a dead connection (network change, laptop sleep). | Start the tunnel again, then restart the client. |
 | Tunnel: `bind ... Address already in use` | Something on the laptop already uses port 8000 (often `mock_policy_server.py`). | Stop it, then open the tunnel again. |
 | Downloads from Hugging Face fail | Network / rate limit. | Retry; optionally log in with `huggingface-cli login`. |

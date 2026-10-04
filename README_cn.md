@@ -194,7 +194,7 @@ bash scripts/run_real_eval_server.sh
 - **步骤1**： 参考 [unitree_deploy/README.md](https://github.com/unitreerobotics/unifolm-world-model-action/blob/main/unitree_deploy/README.md)，创建 ```unitree_deploy``` conda 环境，安装所需依赖包，并在真实机器人端启动控制器或服务;
 - **步骤2**: 打开一个新的终端，从客户端到服务器建立隧道连接：
 ```
-ssh user_name@remote_server_IP -CNg -L 8000:127.0.0.1:8000
+ssh user_name@remote_server_IP -CN -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ExitOnForwardFailure=yes -L 8000:127.0.0.1:8000
 ```
 - **步骤3**： 运行 ```unitree_deploy/robot_client.py``` 脚本以启动推理：
 ```
