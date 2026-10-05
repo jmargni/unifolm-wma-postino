@@ -10,6 +10,7 @@ from typing import Any, Deque, MutableMapping, OrderedDict
 from collections import deque
 from pathlib import Path
 
+from unitree_deploy.pep_bridge import TwinPEP
 from unitree_deploy.real_unitree_env import make_real_env
 from unitree_deploy.utils.eval_utils import (
     ACTTemporalEnsembler,
@@ -73,6 +74,7 @@ def run_policy(
     temporal_ensembler: ACTTemporalEnsembler,
     cond_obs_queues: MutableMapping[str, Deque[torch.Tensor]],
     output_dir: Path,
+    pep: TwinPEP | None = None,
 ) -> None:
     """
     Single rollout loop:
@@ -80,8 +82,18 @@ def run_policy(
         2) stream observations,
         3) fetch actions from the policy server,
         4) execute with temporal ensembling for smoother control.
+    With `pep`, the start pose and every chunk are first validated by the twin's PEP.
     """
 
+    if pep is not None:
+        # The robot holds still until the PEP allows the move (e.g. after a person arms the twin).
+        while True:
+            state = env.get_observation(0).observation["qpos"]
+            decision = pep.check_trajectory(INIT_POSE[args.robot_type][None], dt=1.0, start=state)
+            print(f">>> PEP start pose: {decision.decision} {decision.rule_id} {decision.message}", flush=True)
+            if decision.allowed:
+                break
+            time.sleep(3.0)
     _ = env.step(INIT_POSE[args.robot_type])
     time.sleep(2.0)
     t = 0
@@ -99,8 +111,21 @@ def run_policy(
         actions = temporal_ensembler.update(
             pred_actions[:, :args.action_horizon])[0]
 
+        if pep is not None:
+            decision = pep.check_trajectory(actions[:args.exe_steps].cpu().numpy(),
+                                            dt=1 / args.control_freq,
+                                            start=obs["observation.state"].numpy())
+            print(f">>> PEP chunk: {decision.decision} {decision.rule_id} {decision.message}", flush=True)
+            if not decision.allowed:
+                # Hold still and ask the model again from a fresh observation.
+                time.sleep(1.0)
+                continue
+
         # Execute the actions
         for n in range(args.exe_steps):
+            if pep is not None and not pep.may_continue():
+                print(">>> PEP: twin no longer armed (E-stop, disarm or unreachable): chunk aborted", flush=True)
+                break
             action = actions[n].cpu().numpy()
             print(f">>> Exec => step {n} action: {action}", flush=True)
             print("---------------------------------------------")
@@ -119,6 +144,14 @@ def run_policy(
 
 def run_eval(args: argparse.Namespace) -> None:
     client = LongConnectionClient(BASE_URL)
+
+    pep = None
+    if args.pep_url:
+        if args.robot_type != "g1_dex1":
+            raise ValueError("--pep_url supports only --robot_type g1_dex1")
+        pep = TwinPEP(args.pep_url)
+        twin = pep.state()  # fails here if the twin is not reachable
+        print(f">>> Twin PEP at {args.pep_url}: robot {twin['id']} is {twin['mode']}", flush=True)
 
     # Initialize ACT temporal moving-averge smoother
     temporal_ensembler = ACTTemporalEnsembler(temporal_ensemble_coeff=0.01,
@@ -145,7 +178,7 @@ def run_eval(args: argparse.Namespace) -> None:
             output_dir = Path(args.output_dir) / f"episode_{episode_idx:03d}"
             output_dir.mkdir(parents=True, exist_ok=True)
             run_policy(args, env, client, temporal_ensembler, cond_obs_queues,
-                       output_dir)
+                       output_dir, pep)
     finally:
         env.close()
     env.close()
@@ -194,6 +227,11 @@ def get_parser() -> argparse.ArgumentParser:
                         type=float,
                         default=30,
                         help="The Low-level control frequency in Hz.")
+    parser.add_argument("--pep_url",
+                        type=str,
+                        default=None,
+                        help="Base URL of the DGS G1-D Cyber Twin (e.g. http://127.0.0.1:3000). "
+                        "If set, every chunk is validated by the twin's PEP before execution.")
     return parser
 
 

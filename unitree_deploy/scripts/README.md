@@ -8,10 +8,11 @@ camera images (section 9).
 
 | File | What it is | Replaces |
 | --- | --- | --- |
-| `robot_client.py` | The client. Reads the robot state, asks the model server for actions, sends them to the robot. | — (this is the real one, unmodified) |
+| `robot_client.py` | The client (the "postino"). Reads the robot state, asks the model server for actions, sends them to the robot. | — (Unitree's client, with a colour fix, the training start pose and the optional `--pep_url`) |
 | `mock_g1_robot.py` | A fake Unitree G1 with two Dex1 grippers, shown in a MuJoCo window. | The real G1 |
 | `sim_g1_robot.py` | A physics simulation of the G1 with grippers, cameras and a table scene (see section 9). | The real G1 and its cameras |
 | `mock_policy_server.py` | A fake model server on `http://127.0.0.1:8000`. | `scripts/evaluation/real_eval_server.py` (needs a GPU and the 16.7 GB checkpoint) |
+| `view_camera_stream.py` | Shows the simulator's camera stream in a window (Esc to close). | — |
 
 ```
                  joint state (DDS)                 observation (HTTP POST)
@@ -19,6 +20,162 @@ mock_g1_robot.py ─────────────────► robot_cl
                  ◄─────────────────                 ◄─────────────────────
                  joint commands (DDS)               16 future actions
 ```
+
+## Quick start
+
+Three ready-to-run setups. All run on the laptop except the real model (EC2).
+
+| Setup | Robot | Model | PEP |
+| --- | --- | --- | --- |
+| **A** | simulator (G1) | mock | — |
+| **B** | simulator (G1-D) | mock | Cyber Twin |
+| **C** | simulator (G1-D) | real model on EC2 | Cyber Twin |
+
+In **every laptop terminal**, first run:
+
+```bash
+conda activate unitree_deploy
+cd ~/projects/unifolm-wma-postino/unitree_deploy/scripts
+```
+
+The mock model and the SSH tunnel to EC2 both use port 8000: run **one or
+the other**, never both.
+
+### A. Simulator + mock model (3 terminals)
+
+```bash
+# Terminal 1 - simulator (a MuJoCo window opens with the robot)
+python sim_g1_robot.py
+
+# Terminal 2 - mock model
+python mock_policy_server.py
+
+# Terminal 3 - client
+UNITREE_IMAGE_SERVER=127.0.0.1 python robot_client.py --control_freq 15
+```
+
+After a few seconds the client prints `All Device Connect Success`, then
+`>>> Exec => step N action: [...]` lines, and the arms move slowly in the
+MuJoCo window. The mock model answers instantly with a gentle wave, so the
+motion is continuous.
+
+### B. G1-D simulator + mock model + Cyber Twin PEP (4 terminals)
+
+The simulator runs the **G1-D**, the twin's robot (wheeled base and lifting
+column held fixed, same arms as the G1, Dex1-like grippers), and the client
+asks the twin's PEP before every move.
+
+```bash
+# Terminal 1 - simulator with the G1-D
+python sim_g1_robot.py --robot g1d
+
+# Terminal 2 - mock model
+python mock_policy_server.py
+
+# Terminal 3 - the twin (PEP, and consoles on :3000 and :4000)
+cd ~/projects/DGS-CyberTwin-G1D
+python3 server.py
+
+# Terminal 4 - client, with every chunk validated by the PEP
+UNITREE_IMAGE_SERVER=127.0.0.1 python robot_client.py --control_freq 15 --pep_url http://127.0.0.1:3000
+```
+
+Start the twin before the client: without it the robot never moves.
+Then arm the robot in the browser (see *Using the PEP* below).
+
+### C. G1-D simulator + real model on EC2 + Cyber Twin PEP
+
+Same as B, with the real model in place of the mock. Server set-up, first
+start and costs are in [README_EC2.md](../../README_EC2.md).
+
+**1. Start the model server on EC2.** Start the instance in the AWS console
+and copy its public IP (it changes at every start; below: `EC2_IP`). Then:
+
+```bash
+ssh -i ~/.ssh/id_ed25519 ubuntu@EC2_IP
+tmux new -s model                 # or: tmux attach -t model, if it is already running
+conda activate unifolm-wma
+cd ~/unifolm-world-model-action
+bash scripts/run_real_eval_server.sh
+```
+
+Wait for `>>> Inference server is ready ...` (a few minutes), then leave tmux
+with `Ctrl+B`, then `D`, and close this SSH session.
+
+**2. On the laptop, four terminals:**
+
+```bash
+# Terminal 1 - simulator with the G1-D
+python sim_g1_robot.py --robot g1d
+
+# Terminal 2 - SSH tunnel to the model (instead of the mock model); leave it open
+ssh -i ~/.ssh/id_ed25519 -N -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
+    -o ExitOnForwardFailure=yes -L 8000:127.0.0.1:8000 ubuntu@EC2_IP
+
+# Terminal 3 - the twin
+cd ~/projects/DGS-CyberTwin-G1D
+python3 server.py
+
+# Terminal 4 - client
+UNITREE_IMAGE_SERVER=127.0.0.1 python robot_client.py --control_freq 15 --pep_url http://127.0.0.1:3000 \
+    --language_instruction "pack black camera into box"
+```
+
+Check the tunnel before starting the client (in any terminal):
+
+```bash
+curl -s -m 10 -o /dev/null -w "%{http_code}\n" http://127.0.0.1:8000/docs     # 200 = model reachable
+```
+
+Then arm the robot in the browser (see *Using the PEP* below).
+
+With the real model each request takes about 30 s (upload plus the model's
+time on the GPU): the robot moves for about 1 s, then holds still until the
+next answer. The model's "imagined" videos are saved on EC2 in
+`~/results/unitree_g1_pack_camera/testing/videos/`.
+
+### Using the PEP (setups B and C)
+
+1. Open **http://127.0.0.1:3000**. The client prints
+   `PEP start pose: DENY G1D-107 ... arm richiesto` every 3 s: the robot waits.
+2. Click **Arma robot**. The client prints `PEP start pose: ALLOW`, the robot
+   moves to the start pose, and then `PEP chunk: ALLOW ...` before every chunk.
+   The 3D robot on the page follows the arms.
+3. Open **http://127.0.0.1:4000** to see every decision in the event log.
+
+| In the browser | Effect |
+| --- | --- |
+| **E-STOP** (3000 or 4000) | robot stops within one step; every chunk denied |
+| **Reset** in Defense (4000), then **Arma robot** (3000) | loop resumes |
+| **Disarma** (3000) | robot stops; chunks denied until armed again |
+| Enforce → monitor (4000) | violations logged as `MONITOR` but executed |
+| Twin closed | robot holds; nothing moves until the twin is back and armed |
+
+How the PEP check works: section 10.
+
+### Stopping
+
+- `Ctrl+C` in each laptop terminal: client first, then the others.
+- Setup C: **stop the EC2 instance** in the AWS console when you are done
+  (it bills while running). The model server in tmux stops with it.
+
+### Optional: see the simulated cameras
+
+In another laptop terminal (same `conda activate` and `cd`):
+
+```bash
+python view_camera_stream.py      # Esc to close
+```
+
+### Common messages
+
+| Client prints | Meaning |
+| --- | --- |
+| `PEP start pose: DENY G1D-107 ... arm richiesto` | normal: arm the robot on :3000 |
+| `PEP start pose: UNREACHABLE ...` | the twin is not running, or `--pep_url` is wrong |
+| `[G1_29_ArmController] Waiting to subscribe dds...` | the simulator is not running |
+| `An error occurred: ... Connection refused` (repeated) | no model on port 8000: start the mock or the tunnel |
+| `DEBUG:urllib3...Resetting dropped connection` | harmless: the twin closes each connection |
 
 ## 1. Start everything
 
@@ -241,6 +398,16 @@ physics instead of copying the commanded positions:
   box (on its right), matching the default instruction "Pack black camera into
   box".
 
+- **Robot:** `--robot g1` (default) is the humanoid G1 with its pelvis fixed.
+  `--robot g1d` is the **G1-D** of the DGS Cyber Twin (Unitree's
+  `g1_d_description`, copied in `unitree_deploy/robot_devices/assets/g1d`):
+  wheeled base, lifting column (retracted) and torso held fixed, the same
+  14-joint arms as the G1 (identical meshes, joint positions and limits) and
+  the same Dex1-like grippers instead of its three-finger hands. Its arm motors
+  use the G1's indices 15-28 on DDS, so the client works unchanged; the other
+  indices are reported at 0. This numbering is the simulator's choice: how a
+  real G1-D numbers its motors over DDS has not been checked.
+
 Start it like the mock, and tell the client where the cameras are:
 
 ```bash
@@ -286,3 +453,57 @@ Limits:
   simulator on a network where a real Unitree robot is connected.
 - **Objects cannot be dragged with the mouse** in the MuJoCo window, and
   camera images are rendered without shadows (to keep the frame rate up).
+
+## 10. Validating every chunk with the Cyber Twin's PEP
+
+With `--pep_url`, the client asks the policy enforcement point (PEP) of the
+DGS G1-D Cyber Twin for permission before moving:
+
+```
+model ──16 actions──► robot_client.py ──"trajectory"──► twin PEP (:3000) ──ALLOW──► execute in the simulator
+                                                              │
+                                                              └─► audit log / SIEM, 3D console mirrors the pose
+```
+
+- **Start pose:** the robot holds still until the PEP allows it, for example
+  until a person presses **Arma robot** in the twin's console (`:3000`).
+- **Each chunk:** the 16 actions go to the PEP as one `trajectory` command. It
+  checks identity, armed / E-stop state, replay, the G1-D URDF joint limits and
+  a lab joint-speed limit of 3 rad/s (also from the measured pose to the first
+  action). Denied chunks are not executed: the robot holds and the client asks
+  the model again.
+- **During a chunk:** before every step the client checks the twin is still
+  armed. An E-stop or disarm from the consoles stops the robot within one step.
+- **Fail closed:** if the twin cannot be reached, nothing moves.
+- **Monitor mode:** if enforcement is switched off in the Defense console
+  (`:4000`), violations are recorded as `MONITOR` and the chunk is executed.
+
+The client never arms the twin and never clears an E-stop.
+
+Start the twin (its own folder, plain Python), then the client with the flag:
+
+```bash
+# Terminal 1 - the twin and its consoles (:3000 robot, :4000 Red Team / Defense)
+cd ~/projects/DGS-CyberTwin-G1D && python3 server.py
+
+# Terminals 2 and 3 - simulator and model server as in sections 1 or 9
+
+# Terminal 4 - the client
+UNITREE_IMAGE_SERVER=127.0.0.1 python robot_client.py --control_freq 15 \
+    --pep_url http://127.0.0.1:3000
+```
+
+The client prints one line per decision:
+
+```
+>>> PEP start pose: DENY G1D-107 Sequenza non valida: arm richiesto prima del movimento
+>>> PEP chunk: ALLOW G1D-200 Eseguito: trajectory
+>>> PEP chunk: DENY G1D-102 Traiettoria: left_shoulder_roll_joint oltre 3.0 rad/s al punto 0
+>>> PEP: twin no longer armed (E-stop, disarm or unreachable): chunk aborted
+```
+
+Requirements on the twin side: the `trajectory` command in `engine.py` and the
+`/api/robot` endpoint in `server.py` (added for this bridge). Only
+`--robot_type g1_dex1` is supported: its 14 arm joints map by name to the
+G1-D's arms; the two Dex1 grippers map to the G1-D hands' open / closed state.
+The bridge code is in `unitree_deploy/unitree_deploy/pep_bridge.py`.
