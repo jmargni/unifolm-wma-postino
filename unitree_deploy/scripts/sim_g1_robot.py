@@ -15,7 +15,9 @@ Unlike `mock_g1_robot.py`, the robot is simulated with MuJoCo physics:
     - the pelvis is fixed in place (the real robot balances with Unitree's own controller, not simulated here);
     - the head stereo camera and the two wrist cameras are rendered and streamed.
 
-The scene is a table with a black "camera" and an open box. The Dex1 grippers are simplified two-finger
+The scene is laid out from the real "pack black camera into box" episode replayed by replay_policy_server.py:
+a black camera (robot's right), an open box (centre) and a black case (left) on a table, where the recorded
+grippers close and open, so the replay really packs the camera. The Dex1 grippers are simplified two-finger
 grippers; their opening (0 = closed, 5.45 = open) maps linearly to the finger travel.
 
 With --robot g1d the robot is the G1-D of the DGS Cyber Twin (Unitree's g1_d_description URDF, in
@@ -29,10 +31,12 @@ To make the client read the simulated cameras, start it with:
 """
 
 import argparse
+import json
 import multiprocessing as mp
 import os
 import threading
 import time
+import urllib.request
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -58,6 +62,14 @@ NUM_BODY_MOTORS = 29
 ARM_JOINT_INDICES = range(15, 29)  # G1_29_JointIndex of the 14 arm joints, the only ones the G1-D shares with the G1
 # G1-D joints held fixed: wheels, lifting column (retracted, as in the twin's default) and torso yaw/pitch.
 G1D_FIXED_JOINTS = ("Left_Wheel_Joint", "Right_Wheel_Joint", "LZ_mt_Joint", "LZ_it_Joint", "Yaw_Joint", "torso_Joint")
+# With --twin_url, the G1-D's base (planar joints added here), wheels, column and torso follow the Cyber Twin's
+# state kinematically, at most at these speeds (the twin changes column height and joints instantly).
+G1D_BASE_JOINTS = ("base_x", "base_y", "base_yaw")
+G1D_FOLLOW_SPEED = {"base_x": 1.0, "base_y": 1.0, "base_yaw": 2.0, "LZ_mt_Joint": 0.1, "LZ_it_Joint": 0.1,
+                    "Yaw_Joint": 1.0, "torso_Joint": 1.0}  # m/s or rad/s; wheels follow the twin directly
+# Parts of the G1-D below the torso: they do not collide when the base moves (they would scrape the floor).
+G1D_BASE_BODIES = ("AGV_link", "Left_Wheel_Link", "RIght_Wheel_Link", "LZ_ot_Link", "LZ_mt_Link", "LZ_it_Link",
+                   "Pitching_Link", "Yaw_Link")
 # The G1-D URDF has no joint armature or friction; these are the values of Unitree's G1 MJCF (class "g1"),
 # whose arms are identical to the G1-D's (same meshes, joint origins, axes and limits).
 ARM_ARMATURE = 0.01
@@ -71,7 +83,12 @@ MODE_MACHINE = 5  # g1_29dof_rev_1_0, see assets/g1/README.md
 GRIPPER_Q_MAX = 5.45
 FINGER_TRAVEL = 0.04
 
-# Gains used until the first rt/lowcmd arrives, so the arms hold the zero pose instead of falling.
+# Arm pose at start-up, held until the first rt/lowcmd: the first pose of the recorded "pack black camera into
+# box" episode, the same as robot_client.py's INIT_POSE for g1_dex1. (The zero pose would go through the table.)
+START_ARM_POSE = np.array([-0.50163078, 0.32051945, 0.18178487, 0.6838522, -0.085745335, -0.51033354, -0.25062084,
+                           -0.40424705, -0.26256371, -0.20069599, 0.21123028, 0.1912303, -0.20726478, 0.28874797])
+
+# Gains used until the first rt/lowcmd arrives, so the arms hold the start pose instead of falling.
 DEFAULT_KP = 100.0
 DEFAULT_KD = 3.0
 
@@ -79,7 +96,6 @@ CAMERA_HEIGHT, CAMERA_WIDTH = 480, 640
 # Stream layout expected by ImageClient: [head left | head right | left wrist | right wrist], side by side.
 STREAM_CAMERAS = ("head_left", "head_right", "left_wrist", "right_wrist")
 
-TABLE_TOP_Z = 0.76
 
 
 def _xyaxes_quat(x_axis, y_axis):
@@ -147,55 +163,77 @@ def _add_gripper(spec, side):
     wrist.add_camera(name=f"{side}_wrist", pos=[0.04, 0, 0.045], quat=_camera_quat(15), fovy=90)
 
 
-def _add_scene(spec, dx=0.0, table_top_z=TABLE_TOP_Z):
-    """Table, camera and box. `dx` shifts the scene forward, `table_top_z` sets the table height."""
+# Scene of the "pack black camera into box" task, laid out from the real recorded episode replayed by
+# replay_policy_server.py (replay_data/g1_pack_camera_ep0.npz): each object is where a gripper closes on it,
+# sized so the fingers close on it as far as they do in the recording. Positions are relative to torso_link,
+# whose height and arms are the same on the G1 and G1-D (x forward, y left, z up; m and degrees).
+PACK_TABLE_TOP = 0.030  # 4 mm below the lowest point the arms reach in the episode
+# Objects are as tall as needed for their middle to be at the height where the fingers close (about 4 cm above the
+# table): gripped by the top edge only, they slip out when lifted.
+PACK_CAMERA = dict(pos=(0.286, -0.143), yaw=-27, half=(0.015, 0.032, 0.035))  # right hand: 30 mm between fingers
+PACK_BOX = dict(pos=(0.248, -0.045), inner_half=(0.048, 0.042), wall_height=0.015, wall=0.004)  # right hand opens
+PACK_CASE = dict(pos=(0.284, 0.145), yaw=15, half=(0.026, 0.022, 0.035))  # left hand: 52 mm between fingers
+
+
+def _yaw_quat(deg):
+    return [np.cos(np.deg2rad(deg) / 2), 0, 0, np.sin(np.deg2rad(deg) / 2)]
+
+
+def _add_open_box(body, half_x, half_y, height, wall, mass, rgba):
+    """Open-top box made of a floor and four walls, with its bottom at the body origin."""
+    body.add_geom(type=mujoco.mjtGeom.mjGEOM_BOX, pos=[0, 0, wall / 2], size=[half_x + wall, half_y + wall, wall / 2],
+                  mass=mass / 5, rgba=rgba)
+    for pos, size in (
+        ([half_x + wall / 2, 0, height / 2], [wall / 2, half_y + wall, height / 2]),
+        ([-half_x - wall / 2, 0, height / 2], [wall / 2, half_y + wall, height / 2]),
+        ([0, half_y + wall / 2, height / 2], [half_x, wall / 2, height / 2]),
+        ([0, -half_y - wall / 2, height / 2], [half_x, wall / 2, height / 2]),
+    ):
+        body.add_geom(type=mujoco.mjtGeom.mjGEOM_BOX, pos=pos, size=size, mass=mass / 5, rgba=rgba)
+
+
+def _add_scene(spec, torso_x, torso_z):
+    """Table with the black camera (right), the open box (centre) and a black case (left), placed relative to
+    the robot's torso as in the recorded "pack black camera into box" episode."""
     world = spec.worldbody
     world.add_light(pos=[0.6, 0, 2.5], dir=[0, 0, -1], diffuse=[0.3, 0.3, 0.3])
+    top = torso_z + PACK_TABLE_TOP
 
     # Table in front of the robot.
-    table_size = [0.25, 0.6, 0.02]
-    world.add_geom(
-        name="table_top",
-        type=mujoco.mjtGeom.mjGEOM_BOX,
-        pos=[dx + 0.25 + table_size[0], 0, table_top_z - table_size[2]],
-        size=table_size,
-        rgba=[0.55, 0.4, 0.28, 1],
-    )
-    for x in (0.27, 0.73):
-        for y in (-0.57, 0.57):
-            world.add_geom(
-                type=mujoco.mjtGeom.mjGEOM_BOX,
-                pos=[dx + x, y, (table_top_z - 0.04) / 2],
-                size=[0.02, 0.02, (table_top_z - 0.04) / 2],
-                rgba=[0.4, 0.3, 0.2, 1],
-            )
+    table_size = [0.25, 0.5, 0.02]
+    table_x = torso_x + 0.15 + table_size[0]
+    world.add_geom(name="table_top", type=mujoco.mjtGeom.mjGEOM_BOX, pos=[table_x, 0, top - table_size[2]],
+                   size=table_size, rgba=[0.55, 0.4, 0.28, 1])
+    for x in (table_x - table_size[0] + 0.03, table_x + table_size[0] - 0.03):
+        for y in (-table_size[1] + 0.03, table_size[1] - 0.03):
+            world.add_geom(type=mujoco.mjtGeom.mjGEOM_BOX, pos=[x, y, (top - 0.04) / 2],
+                           size=[0.02, 0.02, (top - 0.04) / 2], rgba=[0.4, 0.3, 0.2, 1])
 
-    # Black "camera" to pick up.
-    camera = world.add_body(name="black_camera", pos=[dx + 0.42, 0.15, table_top_z + 0.035])
+    def place(spec_):
+        return [torso_x + spec_["pos"][0], spec_["pos"][1]]
+
+    # Black camera, picked up by the right hand: its narrow side faces the closing fingers.
+    half = PACK_CAMERA["half"]
+    camera = world.add_body(name="black_camera", pos=[*place(PACK_CAMERA), top + half[2]],
+                            quat=_yaw_quat(PACK_CAMERA["yaw"]))
     camera.add_freejoint()
-    camera.add_geom(type=mujoco.mjtGeom.mjGEOM_BOX, size=[0.05, 0.03, 0.035], mass=0.3, rgba=[0.05, 0.05, 0.05, 1])
-    camera.add_geom(
-        type=mujoco.mjtGeom.mjGEOM_CYLINDER,
-        pos=[-0.045, 0, 0],
-        quat=[0.7071068, 0, 0.7071068, 0],
-        size=[0.022, 0.02],
-        mass=0.05,
-        rgba=[0.1, 0.1, 0.1, 1],
-    )
+    camera.add_geom(type=mujoco.mjtGeom.mjGEOM_BOX, size=half, mass=0.08, friction=[1.2, 0.01, 0.001],
+                    rgba=[0.05, 0.05, 0.05, 1])
+    camera.add_geom(type=mujoco.mjtGeom.mjGEOM_CYLINDER, pos=[0, -half[1] - 0.004, 0], quat=[0.7071068, 0.7071068, 0, 0],
+                    size=[0.011, 0.004], mass=0.005, rgba=[0.2, 0.2, 0.25, 1])
 
-    # Open cardboard box to put it in.
-    box = world.add_body(name="box", pos=[dx + 0.45, -0.18, table_top_z])
+    # Open box, where the right hand releases the camera.
+    box = world.add_body(name="box", pos=[*place(PACK_BOX), top])
     box.add_freejoint()
-    half, height, wall = 0.09, 0.08, 0.005
-    cardboard = [0.72, 0.55, 0.35, 1]
-    box.add_geom(type=mujoco.mjtGeom.mjGEOM_BOX, pos=[0, 0, wall], size=[half, half, wall], mass=0.1, rgba=cardboard)
-    for pos, size in (
-        ([half, 0, height / 2], [wall, half, height / 2]),
-        ([-half, 0, height / 2], [wall, half, height / 2]),
-        ([0, half, height / 2], [half, wall, height / 2]),
-        ([0, -half, height / 2], [half, wall, height / 2]),
-    ):
-        box.add_geom(type=mujoco.mjtGeom.mjGEOM_BOX, pos=pos, size=size, mass=0.05, rgba=cardboard)
+    _add_open_box(box, *PACK_BOX["inner_half"], PACK_BOX["wall_height"], PACK_BOX["wall"], mass=0.15,
+                  rgba=[0.72, 0.55, 0.35, 1])
+
+    # Black case, moved by the left hand next to the box.
+    half = PACK_CASE["half"]
+    case = world.add_body(name="black_case", pos=[*place(PACK_CASE), top + half[2]], quat=_yaw_quat(PACK_CASE["yaw"]))
+    case.add_freejoint()
+    case.add_geom(type=mujoco.mjtGeom.mjGEOM_BOX, size=half, mass=0.1, friction=[1.2, 0.01, 0.001],
+                  rgba=[0.08, 0.08, 0.1, 1])
 
 
 def _g1_spec():
@@ -244,8 +282,9 @@ G1D_WORLD_XML = """
 """
 
 
-def _g1d_robot_spec():
-    """The G1-D URDF as a spec, without its hands and with its base, column and torso joints removed (fixed)."""
+def _g1d_robot_spec(movable_base=False):
+    """The G1-D URDF as a spec, without its hands. Its wheel, column and torso joints are removed (fixed),
+    unless `movable_base`."""
     urdf = ET.parse(G1D_URDF_PATH).getroot()
     for tag in ("joint", "link"):
         for element in list(urdf.findall(tag)):
@@ -255,16 +294,18 @@ def _g1d_robot_spec():
     compiler.set("meshdir", str(G1D_URDF_PATH.parent))
     compiler.set("fusestatic", "false")  # keep torso_link and head_link as bodies for the cameras
     robot = mujoco.MjSpec.from_string(ET.tostring(urdf, encoding="unicode"))
-    for name in G1D_FIXED_JOINTS:
-        robot.delete(robot.joint(name))
+    if not movable_base:
+        for name in G1D_FIXED_JOINTS:
+            robot.delete(robot.joint(name))
     return robot
 
 
-def _g1d_spec():
+def _g1d_spec(movable_base=False):
     """Unitree's G1-D on the floor, with its base, column and torso held fixed and its three-finger hands removed
     (Dex1-style grippers are mounted instead). Returns the spec, the 29 body joint names in G1_29_JointIndex
     order (the 14 arm joints have the G1's names and indices, the others do not exist: None), and the x, z
-    position of its torso_link."""
+    position of its torso_link. With `movable_base`, the base gets planar joints (x, y, yaw) and the wheel,
+    column and torso joints are kept, to follow the Cyber Twin."""
     # Measure on a separate copy: a spec must not be compiled and then modified (body references get mixed up).
     model = _g1d_robot_spec().compile()
     data = mujoco.MjData(model)
@@ -278,7 +319,16 @@ def _g1d_spec():
     torso_x, _, torso_z = data.xpos[model.body("torso_link").id]
 
     spec = mujoco.MjSpec.from_string(G1D_WORLD_XML)
-    spec.attach(_g1d_robot_spec(), frame=spec.worldbody.add_frame(pos=[0, 0, -lowest]), prefix="")
+    spec.attach(_g1d_robot_spec(movable_base), frame=spec.worldbody.add_frame(pos=[0, 0, -lowest]), prefix="")
+    if movable_base:
+        base = spec.body("AGV_link")
+        base.add_joint(name="base_x", type=mujoco.mjtJoint.mjJNT_SLIDE, axis=[1, 0, 0])
+        base.add_joint(name="base_y", type=mujoco.mjtJoint.mjJNT_SLIDE, axis=[0, 1, 0])
+        base.add_joint(name="base_yaw", type=mujoco.mjtJoint.mjJNT_HINGE, axis=[0, 0, 1])
+        # These joints are set kinematically from the twin. A very large armature keeps the arms' motion from
+        # nudging them within a physics step, so the arms behave as on the fixed base.
+        for name in (*G1D_BASE_JOINTS, *G1D_FIXED_JOINTS):
+            spec.joint(name).armature = 1e4
 
     body_joints = [None] * NUM_BODY_MOTORS
     g1_joint_names = _g1_spec()[1]
@@ -299,15 +349,14 @@ def _set_contact_group(body, contype, conaffinity):
         _set_contact_group(child, contype, conaffinity)
 
 
-def build_model(robot="g1"):
-    """G1 (fixed pelvis) or G1-D (fixed base) with Dex1-like grippers, head and wrist cameras, and a table scene."""
-    dx, table_top_z = 0.0, TABLE_TOP_Z
+def build_model(robot="g1", movable_base=False):
+    """G1 (fixed pelvis) or G1-D (fixed base, or following the Cyber Twin with `movable_base`) with Dex1-like
+    grippers, head and wrist cameras, and a table scene."""
     if robot == "g1d":
-        spec, body_joints, (torso_x, torso_z) = _g1d_spec()
-        # Place the table and objects relative to the torso, as for the G1.
-        dx, table_top_z = torso_x - G1_TORSO_POS[0], TABLE_TOP_Z + torso_z - G1_TORSO_POS[1]
+        spec, body_joints, (torso_x, torso_z) = _g1d_spec(movable_base)
     else:
         spec, body_joints = _g1_spec()
+        torso_x, torso_z = G1_TORSO_POS
 
     # Stereo camera in the face, 6 cm apart, looking down at the table.
     torso = spec.body("torso_link")
@@ -316,11 +365,15 @@ def build_model(robot="g1"):
 
     for side in GRIPPER_SIDES:
         _add_gripper(spec, side)
-    _add_scene(spec, dx, table_top_z)
+    _add_scene(spec, torso_x, torso_z)
     if robot == "g1d":
         # The G1-D URDF's collision meshes overlap at the wrist joints. The robot's own parts (grippers
         # included) do not collide with each other, but still collide with the table, objects and floor.
         _set_contact_group(spec.body("AGV_link"), contype=2, conaffinity=1)
+        if movable_base:
+            for name in G1D_BASE_BODIES:
+                for geom in spec.body(name).geoms:
+                    geom.contype = geom.conaffinity = 0
 
     spec.option.timestep = 0.002
     return spec.compile(), body_joints
@@ -345,16 +398,30 @@ class SimG1:
             side: [model.joint(f"{side}_finger_{f}_joint").dofadr[0] for f in "ab"] for side in GRIPPER_SIDES
         }
         self.finger_actuators = {side: [model.actuator(f"{side}_finger_{f}").id for f in "ab"] for side in GRIPPER_SIDES}
+        # G1-D following the Cyber Twin: base, wheel, column and torso joints set kinematically each step.
+        follow = [n for n in (*G1D_BASE_JOINTS, *G1D_FIXED_JOINTS) if mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, n) >= 0]
+        self.follow_names = follow
+        self.follow_qpos_adr = np.array([model.joint(n).qposadr[0] for n in follow], dtype=int)
+        self.follow_dof_adr = np.array([model.joint(n).dofadr[0] for n in follow], dtype=int)
+        self.follow_speed = np.array([G1D_FOLLOW_SPEED.get(n, np.inf) for n in follow])
+        self.follow_target = np.zeros(len(follow))
+
+        # Start with the arms at the task's start pose and the grippers open.
+        arm_qpos = [model.joint(body_joints[i]).qposadr[0] for i in ARM_JOINT_INDICES]
+        self.data.qpos[arm_qpos] = START_ARM_POSE
+        for side in GRIPPER_SIDES:
+            self.data.qpos[self.finger_qpos_adr[side]] = FINGER_TRAVEL
         mujoco.mj_forward(model, self.data)
 
         # Latest commands, written by the DDS callbacks and read by the physics loop.
         self.lock = threading.Lock()
         self.q_cmd = np.zeros(NUM_BODY_MOTORS)
+        self.q_cmd[ARM_JOINT_INDICES] = START_ARM_POSE
         self.dq_cmd = np.zeros(NUM_BODY_MOTORS)
         self.kp = np.full(NUM_BODY_MOTORS, DEFAULT_KP)
         self.kd = np.full(NUM_BODY_MOTORS, DEFAULT_KD)
         self.tau_ff = np.zeros(NUM_BODY_MOTORS)
-        self.gripper_q_cmd = dict.fromkeys(GRIPPER_SIDES, 0.0)
+        self.gripper_q_cmd = dict.fromkeys(GRIPPER_SIDES, GRIPPER_Q_MAX)  # open
         self.num_lowcmd = 0
         self.num_gripper_cmd = 0
         self.tau = np.zeros(NUM_BODY_MOTORS)
@@ -393,9 +460,38 @@ class SimG1:
             self.gripper_q_cmd[side] = float(np.clip(msg.cmds[0].q, 0.0, GRIPPER_Q_MAX))
             self.num_gripper_cmd += 1
 
+    def set_twin_state(self, robot: dict):
+        """Target pose of the base, wheels, column and torso from the Cyber Twin's /api/robot state."""
+        values = {"base_x": robot["x"], "base_y": robot["y"], "base_yaw": robot["yaw"], **robot["joints"]}
+        with self.lock:
+            self.follow_target[:] = [values.get(n, 0.0) for n in self.follow_names]
+
+    def objects_status(self):
+        """Where the black camera is, and whether it lies inside the box (for the status line)."""
+        m, d = self.model, self.data
+        cam = d.xpos[m.body("black_camera").id]
+        box = d.xpos[m.body("box").id]
+        rot = d.xmat[m.body("box").id].reshape(3, 3)
+        local = rot.T @ (cam - box)
+        inside = all(abs(local[:2]) < PACK_BOX["inner_half"]) and local[2] < PACK_BOX["wall_height"] + 0.03
+        return f"camera at ({cam[0]:.2f}, {cam[1]:.2f}, {cam[2]:.2f}){' IN THE BOX' if inside else ''}"
+
+    def base_pose(self):
+        """x, y, yaw of the base and column height (0 if this robot does not follow the twin)."""
+        q = dict(zip(self.follow_names, self.data.qpos[self.follow_qpos_adr]))
+        return q.get("base_x", 0.0), q.get("base_y", 0.0), q.get("base_yaw", 0.0), q.get("LZ_mt_Joint", 0.0) + q.get("LZ_it_Joint", 0.0)
+
     def step(self):
         """Apply the motor torques and advance the physics by one timestep."""
         data = self.data
+        if len(self.follow_names):
+            # Kinematic: move towards the twin's pose at a limited speed, without dynamics.
+            with self.lock:
+                target = self.follow_target.copy()
+            current = data.qpos[self.follow_qpos_adr]
+            max_step = self.follow_speed * self.model.opt.timestep
+            data.qpos[self.follow_qpos_adr] = current + np.clip(target - current, -max_step, max_step)
+            data.qvel[self.follow_dof_adr] = 0.0
         q = data.qpos[self.qpos_adr]
         dq = data.qvel[self.dof_adr]
         m = self.motors
@@ -445,9 +541,9 @@ class SimG1:
             return self.num_lowcmd, self.num_gripper_cmd
 
 
-def camera_server(shared_qpos, port: int, fps: float, jpeg_quality: int, robot: str):
+def camera_server(shared_qpos, port: int, fps: float, jpeg_quality: int, robot: str, movable_base: bool):
     """Child process: render the cameras from the latest joint positions and stream them like the robot does."""
-    model, _ = build_model(robot)
+    model, _ = build_model(robot, movable_base)
     data = mujoco.MjData(model)
     renderer = mujoco.Renderer(model, CAMERA_HEIGHT, CAMERA_WIDTH)
     # Shadows and reflections make rendering about 5x slower on an integrated GPU.
@@ -478,6 +574,22 @@ def camera_server(shared_qpos, port: int, fps: float, jpeg_quality: int, robot: 
             time.sleep(max(0, 1 / fps - (time.perf_counter() - start)))
     except KeyboardInterrupt:
         pass
+
+
+def twin_follower(robot, twin_url: str, stop_event: threading.Event, rate_hz: float = 20):
+    """Thread: poll the Cyber Twin's state and make the base, column and torso follow it."""
+    url = twin_url.rstrip("/") + "/api/robot"
+    warned = False
+    while not stop_event.is_set():
+        try:
+            with urllib.request.urlopen(url, timeout=2) as response:
+                robot.set_twin_state(json.load(response)["robot"])
+            warned = False
+        except (OSError, ValueError, KeyError) as exc:
+            if not warned:
+                print(f">>> Cyber Twin not reachable at {url} ({exc}); base holds its pose.", flush=True)
+                warned = True
+        time.sleep(1 / rate_hz)
 
 
 def viewer_loop(viewer, view_data, shared_qpos, rate_hz: float = 60):
@@ -512,9 +624,18 @@ def main():
         help="g1: humanoid G1 with fixed pelvis. g1d: G1-D (wheeled base and column, held fixed), the robot of the "
         "DGS Cyber Twin. Both with the same arms and Dex1-like grippers.",
     )
+    parser.add_argument(
+        "--twin_url",
+        type=str,
+        default=None,
+        help="G1-D only: URL of the DGS Cyber Twin (e.g. http://127.0.0.1:3000). The base, wheels, column and "
+        "torso then follow the twin's state, so base and column commands allowed by its PEP move the robot.",
+    )
     args = parser.parse_args()
+    if args.twin_url and args.robot != "g1d":
+        parser.error("--twin_url needs --robot g1d")
 
-    model, body_joints = build_model(args.robot)
+    model, body_joints = build_model(args.robot, movable_base=bool(args.twin_url))
     robot = SimG1(model, body_joints, args.network_interface)
     data = robot.data
 
@@ -527,7 +648,7 @@ def main():
     if not args.no_cameras:
         camera_process = ctx.Process(
             target=camera_server,
-            args=(shared_qpos, args.image_port, args.camera_fps, args.jpeg_quality, args.robot),
+            args=(shared_qpos, args.image_port, args.camera_fps, args.jpeg_quality, args.robot, bool(args.twin_url)),
             daemon=True,
         )
         camera_process.start()
@@ -539,6 +660,10 @@ def main():
         view_data = mujoco.MjData(model)
         viewer = mujoco.viewer.launch_passive(model, view_data)
         threading.Thread(target=viewer_loop, args=(viewer, view_data, shared_qpos), daemon=True).start()
+    stop_event = threading.Event()
+    if args.twin_url:
+        threading.Thread(target=twin_follower, args=(robot, args.twin_url, stop_event), daemon=True).start()
+        print(f">>> Base, column and torso follow the Cyber Twin at {args.twin_url}.", flush=True)
     print(f">>> Simulated {'G1-D' if args.robot == 'g1d' else 'G1'} is running. Start robot_client.py now. "
           "Ctrl+C to stop.", flush=True)
 
@@ -579,12 +704,14 @@ def main():
                 grippers = [round(robot.gripper_q(side)[0], 2) for side in GRIPPER_SIDES]
                 print(
                     f"real-time x{realtime:.2f} | lowcmd msgs: {num_lowcmd} | gripper cmd msgs: {num_gripper_cmd} | "
-                    f"arm q: {np.round(arm_q, 2)} | grippers: {grippers}",
+                    f"arm q: {np.round(arm_q, 2)} | grippers: {grippers} | {robot.objects_status()}"
+                    + (" | base x {:.2f} y {:.2f} yaw {:.2f} column {:.3f}".format(*robot.base_pose()) if args.twin_url else ""),
                     flush=True,
                 )
     except KeyboardInterrupt:
         pass
     finally:
+        stop_event.set()
         if viewer is not None:
             viewer.close()
         if camera_process is not None:

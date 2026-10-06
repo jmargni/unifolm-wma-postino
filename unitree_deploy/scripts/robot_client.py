@@ -1,4 +1,5 @@
 import argparse
+import logging
 import os
 import time
 import cv2
@@ -23,6 +24,9 @@ from unitree_deploy.utils.eval_utils import (
 # -----------------------------------------------------------------------------
 os.environ["http_proxy"] = ""
 os.environ["https_proxy"] = ""
+# eval_utils switches on DEBUG logging for every library; the HTTP library would then print a line for each
+# request to the model and to the twin's PEP (several per second). Keep only its warnings and errors.
+logging.getLogger("urllib3").setLevel(logging.WARNING)
 HOST = "127.0.0.1"
 PORT = 8000
 BASE_URL = f"http://{HOST}:{PORT}"
@@ -171,6 +175,17 @@ def run_eval(args: argparse.Namespace) -> None:
         robot_type=args.robot_type,
         dt=1 / args.control_freq,
     )
+    if args.robot_type == "g1_dex1":
+        # On connect (and on exit) the arm controller drives the arms to its init_pose, and until the first action
+        # it holds its q_target; the grippers hold theirs. All are zeros by default, and with the table of the
+        # "pack camera" task the zero pose goes through the table and the objects (the first action only comes once
+        # the PEP allows it). So the arms and grippers start, wait and finish at the task's start pose instead.
+        start = INIT_POSE[args.robot_type]
+        for arm in env.robot.arm.values():
+            arm.init_pose = start[:14].copy()
+            arm.q_target = start[:14].copy()
+        for gripper, opening in zip(env.robot.endeffector.values(), start[14:]):  # left, right
+            gripper.q_target = np.array([opening])
     env.connect()
 
     try:

@@ -12,6 +12,7 @@ camera images (section 9).
 | `mock_g1_robot.py` | A fake Unitree G1 with two Dex1 grippers, shown in a MuJoCo window. | The real G1 |
 | `sim_g1_robot.py` | A physics simulation of the G1 with grippers, cameras and a table scene (see section 9). | The real G1 and its cameras |
 | `mock_policy_server.py` | A fake model server on `http://127.0.0.1:8000`. | `scripts/evaluation/real_eval_server.py` (needs a GPU and the 16.7 GB checkpoint) |
+| `replay_policy_server.py` | A model server that replays a real recorded "pack black camera into box" episode, so the robot performs the task's movements (best for demos). | `scripts/evaluation/real_eval_server.py` |
 | `view_camera_stream.py` | Shows the simulator's camera stream in a window (Esc to close). | — |
 
 ```
@@ -28,7 +29,8 @@ Three ready-to-run setups. All run on the laptop except the real model (EC2).
 | Setup | Robot | Model | PEP |
 | --- | --- | --- | --- |
 | **A** | simulator (G1) | mock | — |
-| **B** | simulator (G1-D) | mock | Cyber Twin |
+| **B0** | simulator (G1-D) | replay of a real episode | — |
+| **B** | simulator (G1-D) | replay of a real episode (or mock) | Cyber Twin |
 | **C** | simulator (G1-D) | real model on EC2 | Cyber Twin |
 
 In **every laptop terminal**, first run:
@@ -38,8 +40,8 @@ conda activate unitree_deploy
 cd ~/projects/unifolm-wma-postino/unitree_deploy/scripts
 ```
 
-The mock model and the SSH tunnel to EC2 both use port 8000: run **one or
-the other**, never both.
+The mock model, the replay server and the SSH tunnel to EC2 all use port 8000:
+run **only one** of them.
 
 ### A. Simulator + mock model (3 terminals)
 
@@ -59,18 +61,20 @@ After a few seconds the client prints `All Device Connect Success`, then
 MuJoCo window. The mock model answers instantly with a gentle wave, so the
 motion is continuous.
 
-### B. G1-D simulator + mock model + Cyber Twin PEP (4 terminals)
+### B. G1-D simulator + replay model + Cyber Twin PEP (4 terminals)
 
 The simulator runs the **G1-D**, the twin's robot (wheeled base and lifting
 column held fixed, same arms as the G1, Dex1-like grippers), and the client
 asks the twin's PEP before every move.
+New to the PEP? Section 10.1 explains it in plain words.
 
 ```bash
-# Terminal 1 - simulator with the G1-D
-python sim_g1_robot.py --robot g1d
+# Terminal 1 - simulator with the G1-D (its base, column and torso follow the twin)
+python sim_g1_robot.py --robot g1d --twin_url http://127.0.0.1:3000
 
-# Terminal 2 - mock model
-python mock_policy_server.py
+# Terminal 2 - replay model: the movements of a real "pack black camera into box" episode
+python replay_policy_server.py
+#   (or the mock model, a gentle wave: python mock_policy_server.py)
 
 # Terminal 3 - the twin (PEP, and consoles on :3000 and :4000)
 cd ~/projects/DGS-CyberTwin-G1D
@@ -80,8 +84,41 @@ python3 server.py
 UNITREE_IMAGE_SERVER=127.0.0.1 python robot_client.py --control_freq 15 --pep_url http://127.0.0.1:3000
 ```
 
-Start the twin before the client: without it the robot never moves.
+With the replay model the robot **packs the camera**: the right hand picks it
+up, carries it and drops it into the box, then both arms go back to the start
+pose and hold (13.5 s recorded; the loop runs slower than real time, about
+2 minutes). The simulator's status line shows `IN THE BOX` when done; restart
+the simulator to put the camera back on the table. The replay server prints
+the episode step it is playing. For any instruction other than "pack black
+camera into box" the robot holds still, like a model that does not know the
+task. `--full` plays the rest of the recording too (the left hand moves the
+black case next to the box, which can knock the camera out in the simulator).
+
+Start the twin before the client: without it the robot never moves. With
+`--twin_url`, the simulator also follows the twin's base: base and column
+commands from the twin's console (arrows, **Applica altezza**), once allowed by
+the PEP, move the simulated base. Arms are driven only by the model, through
+the PEP check.
 Then arm the robot in the browser (see *Using the PEP* below).
+
+### B0. G1-D simulator + replay model, without the PEP (3 terminals)
+
+The simplest way to see the robot pack the camera:
+
+```bash
+# Terminal 1 - simulator with the G1-D (a MuJoCo window opens)
+python sim_g1_robot.py --robot g1d
+
+# Terminal 2 - replay model
+python replay_policy_server.py
+
+# Terminal 3 - client, without PEP
+UNITREE_IMAGE_SERVER=127.0.0.1 python robot_client.py --control_freq 15
+```
+
+The robot starts immediately (nothing to arm) and nothing is checked. After
+about 2 minutes the simulator prints `IN THE BOX`. To run it again, restart
+the simulator and the replay server.
 
 ### C. G1-D simulator + real model on EC2 + Cyber Twin PEP
 
@@ -105,8 +142,8 @@ with `Ctrl+B`, then `D`, and close this SSH session.
 **2. On the laptop, four terminals:**
 
 ```bash
-# Terminal 1 - simulator with the G1-D
-python sim_g1_robot.py --robot g1d
+# Terminal 1 - simulator with the G1-D (its base, column and torso follow the twin)
+python sim_g1_robot.py --robot g1d --twin_url http://127.0.0.1:3000
 
 # Terminal 2 - SSH tunnel to the model (instead of the mock model); leave it open
 ssh -i ~/.ssh/id_ed25519 -N -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
@@ -136,6 +173,10 @@ next answer. The model's "imagined" videos are saved on EC2 in
 
 ### Using the PEP (setups B and C)
 
+The PEP checks **every command before the robot executes it**: the model's
+actions (sent by the client) and the commands typed in the twin's console.
+Nothing reaches the robot without an ALLOW.
+
 1. Open **http://127.0.0.1:3000**. The client prints
    `PEP start pose: DENY G1D-107 ... arm richiesto` every 3 s: the robot waits.
 2. Click **Arma robot**. The client prints `PEP start pose: ALLOW`, the robot
@@ -148,10 +189,30 @@ next answer. The model's "imagined" videos are saved on EC2 in
 | **E-STOP** (3000 or 4000) | robot stops within one step; every chunk denied |
 | **Reset** in Defense (4000), then **Arma robot** (3000) | loop resumes |
 | **Disarma** (3000) | robot stops; chunks denied until armed again |
+| Arrows / **Applica altezza** (3000) | if allowed, the simulated base drives / the column rises (needs `--twin_url` on the simulator) |
+| Red Team scenarios (4000) | each attack is evaluated by the PEP and denied; nothing moves |
 | Enforce → monitor (4000) | violations logged as `MONITOR` but executed |
 | Twin closed | robot holds; nothing moves until the twin is back and armed |
 
-How the PEP check works: section 10.
+What the PEP is, in plain words: section 10.1. How the client uses it: section 10.2.
+
+### Demo script (setup B, about 5 minutes)
+
+Start setup B, then follow these steps. Each was checked end to end.
+
+| # | Do | What you see |
+| --- | --- | --- |
+| 1 | Nothing yet (twin disarmed) | client: `PEP start pose: DENY G1D-107 ... arm richiesto`; robot still; the model is not even asked |
+| 2 | **Arma robot** on 3000 | client: `PEP start pose: ALLOW`, then `PEP chunk: ALLOW G1D-200` before each chunk; the right hand picks up the camera and drops it into the box (MuJoCo window, camera viewer, and the twin's 3D view); the replay server prints `episode step N/202`, the simulator `IN THE BOX` at the end |
+| 3 | Base forward (arrow ↑) and **Applica altezza** (e.g. 200 mm) on 3000 | the simulated base drives forward and the column rises (with `--twin_url`) |
+| 4 | Run a Red Team scenario on 4000, e.g. *Manipolazione parametri* (base at 5 m/s) | `DENY G1D-102` (or the scenario's rule) in the log; nothing moves |
+| 5 | **E-STOP** while the arms are moving | the arms stop within one step: client prints `chunk aborted`, then `PEP chunk: DENY` |
+| 6 | **Reset** on 4000, **Arma robot** on 3000 | the loop resumes |
+| 7 | Open the event log on 4000 | every ALLOW / DENY above, with its rule and reason |
+
+After an E-stop, the first chunks may be denied with `G1D-102 ... rad/s`:
+the model kept planning while the robot was frozen, so its next move would
+be a jump. The PEP refuses it; the following chunks are allowed again.
 
 ### Stopping
 
@@ -175,7 +236,6 @@ python view_camera_stream.py      # Esc to close
 | `PEP start pose: UNREACHABLE ...` | the twin is not running, or `--pep_url` is wrong |
 | `[G1_29_ArmController] Waiting to subscribe dds...` | the simulator is not running |
 | `An error occurred: ... Connection refused` (repeated) | no model on port 8000: start the mock or the tunnel |
-| `DEBUG:urllib3...Resetting dropped connection` | harmless: the twin closes each connection |
 
 ## 1. Start everything
 
@@ -394,10 +454,19 @@ physics instead of copying the commanded positions:
 - **Cameras:** a stereo head camera and one camera per wrist, streamed on
   `tcp://*:5555` in the same format as the robot's image server. The model
   receives the right head image.
-- **Scene:** a table with a black "camera" (on the robot's left) and an open
-  box (on its right), matching the default instruction "Pack black camera into
-  box".
+- **Scene:** laid out from the real "pack black camera into box" episode used
+  by `replay_policy_server.py`: a black camera (on the robot's right), an open
+  box (centre) and a black case (left), placed where the recorded grippers
+  close and open, and sized so the fingers grip them. The table is at the
+  height the recorded hands reach. Both arms start at the task's start pose
+  (the zero pose would go through the table). The status line every 2 s shows
+  where the camera is and `IN THE BOX` once it is packed.
 
+- **Base following the twin:** with `--robot g1d --twin_url http://127.0.0.1:3000`
+  the G1-D's base (x, y, rotation), wheels, column and torso follow the Cyber
+  Twin's state about 20 times a second, smoothly, without physics. Base and
+  column commands sent from the twin's console (and allowed by its PEP) then
+  move the simulated robot. Without `--twin_url` they stay fixed.
 - **Robot:** `--robot g1` (default) is the humanoid G1 with its pelvis fixed.
   `--robot g1d` is the **G1-D** of the DGS Cyber Twin (Unitree's
   `g1_d_description`, copied in `unitree_deploy/robot_devices/assets/g1d`):
@@ -455,6 +524,81 @@ Limits:
   camera images are rendered without shadows (to keep the frame rate up).
 
 ## 10. Validating every chunk with the Cyber Twin's PEP
+
+### 10.1 What the PEP is
+
+The **PEP** (Policy Enforcement Point) is a **security checkpoint between the
+AI model and the robot**. Before the robot moves, the PEP looks at what it is
+about to do and answers **yes** or **no**.
+
+```
+  AI model                 postino                  PEP (in the Cyber Twin)          robot (simulator)
+  "move like this" ──────► "may I do this?" ──────► checks the rules
+                                                      │
+                                       YES (ALLOW) ◄──┤──► written in the log
+                           robot moves ◄───────────────┘
+                                       NO  (DENY)  ──► robot stays still, reason logged
+```
+
+The model is the **brain**, the robot is the **body**, and the PEP is a
+**guard** standing between them.
+
+**Why it is needed.** The AI model can be wrong, or be tricked by a malicious
+instruction. If its output went straight to the robot, the robot would do
+whatever the model said. The PEP makes sure that **only safe, authorised
+movements are executed**, whatever the model says. Testing this guard is the
+point of the security project.
+
+**What the guard checks, every time:**
+
+| Question | If the answer is no |
+| --- | --- |
+| Is the robot **armed** (switched on by a person)? | DENY: "arm required" (G1D-107) |
+| Is an **E-stop** active? | DENY |
+| Is the sender **who it says it is**, with the right permissions? | DENY (G1D-101, 104, 106) |
+| Is this a **new** request, not an old one replayed? | DENY (G1D-105) |
+| Is every joint inside its **physical limits**? | DENY (G1D-102) |
+| Is the movement **not too fast** (at most 3 rad/s)? | DENY (G1D-102) |
+| All fine? | **ALLOW** (G1D-200): the robot moves |
+
+Every decision, yes or no, is written in the **audit log**, visible on the
+security console (port 4000).
+
+**What happens in the loop:**
+
+1. The model sends 16 movements (about 1 second of motion).
+2. The postino asks the PEP: "may the robot do these 16 movements?"
+3. **ALLOW:** the robot does them, and the 3D robot on port 3000 follows.
+   **DENY:** the robot stays still, and the postino asks the model again.
+4. During the movement, the postino checks after each small step that nobody
+   pressed E-STOP. If someone did, it stops at once.
+5. If the PEP cannot be reached at all, the robot does not move:
+   "no guard" means "no movement".
+
+**Who controls the guard:** a **person**, in the browser.
+
+- **Port 3000:** arm or disarm the robot, E-STOP.
+- **Port 4000:** E-STOP, reset, block a user, switch between **enforce**
+  (violations blocked) and **monitor** (violations only logged, to see what
+  *would* be blocked).
+
+The postino never arms the robot or clears an E-stop by itself.
+
+**A real-life comparison:** a building's access gate.
+
+| In the building | In this project |
+| --- | --- |
+| a visitor who wants to go somewhere | the AI model |
+| the gate with its badge reader and guard | the PEP |
+| the room | the robot |
+| the guard's register | the audit log |
+| the alarm that locks every door at once | E-STOP |
+
+The name comes from standard access-control architecture (e.g. NIST), where a
+PEP *enforces* decisions and a PDP (Policy Decision Point) *makes* them; in
+the Cyber Twin both are in the same code (`engine.py`).
+
+### 10.2 How the client uses it
 
 With `--pep_url`, the client asks the policy enforcement point (PEP) of the
 DGS G1-D Cyber Twin for permission before moving:
