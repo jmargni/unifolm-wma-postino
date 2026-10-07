@@ -207,7 +207,7 @@ def _add_gripper(spec, side):
 # m and degrees; yaw = turn about z of the object's x axis).
 PACK_TABLE_TOP = 0.036  # just below the lowest the finger pads reach over the table
 PACK_CAMERA = dict(pos=(0.286, -0.144), yaw=-27.6, half=(0.015, 0.039, 0.011))  # 7.8 x 3.0 x 2.2 cm; right hand closes
-PACK_BOX = dict(pos=(0.248, -0.035), inner_half=(0.019, 0.043), wall_height=0.028, wall=0.003)  # white tray, 9.2 x 4.4 cm
+PACK_BOX = dict(pos=(0.248, -0.035), inner_half=(0.0205, 0.0445), wall_height=0.028, wall=0.003)  # white tray, 9.5 x 4.7 cm
 # The case is a lid, open at the bottom, that goes down over the tray: its inside is ~5 mm wider than the tray on each
 # side. 10.6 x 5.8 x 4 cm; the left hand closes on it.
 PACK_CASE = dict(pos=(0.284, 0.149), yaw=15.8, half=(0.029, 0.053, 0.020), wall=0.002, top=0.003)

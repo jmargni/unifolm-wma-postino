@@ -475,8 +475,8 @@ physics instead of copying the commanded positions:
   flat black camera with a blue screen (robot's right), a white tray with a
   black rim (the box, centre, fixed on the table) and a black case with a blue
   strip (left): a lid open at the bottom, wide enough to go down over the box
-  (5 mm clearance per side). Sizes measured in the dataset images (the box
-  inside 3.8 x 8.6 cm, the lid 5.8 x 10.6 x 4 cm, a little larger than
+  (3.5 mm clearance per side). Sizes measured in the dataset images (the box
+  inside 4.1 x 8.9 cm, the lid 5.8 x 10.6 x 4 cm, a little larger than
   measured so the lid fits over the box); dark grey floor. The objects are
   placed where the grippers of the recorded episode used by
   `replay_policy_server.py` close and open, so the replay packs the camera.
