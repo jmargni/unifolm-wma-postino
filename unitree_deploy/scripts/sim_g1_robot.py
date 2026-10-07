@@ -7,6 +7,7 @@ It replaces the robot side of the real setup, using the same interfaces:
          publishes   rt/dex1/{left,right}/state
          subscribes  rt/dex1/{left,right}/cmd
     ZMQ  publishes   tcp://*:5555             (JPEG camera stream, same layout as the robot's image server)
+    HTTP (optional)  http://127.0.0.1:PORT    (--web_port: web page with a live, movable view and the status line)
 
 Unlike `mock_g1_robot.py`, the robot is simulated with MuJoCo physics:
     - every motor is driven by the PD law of the real motor driver,
@@ -736,6 +737,177 @@ def camera_server(shared_qpos, port: int, fps: float, jpeg_quality: int, robot: 
         pass
 
 
+WEB_PAGE = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Simulated __ROBOT__</title>
+<style>
+  body { margin: 0; background: #1e1e1e; color: #ddd; font: 14px system-ui, sans-serif; }
+  main { max-width: 980px; margin: 0 auto; padding: 12px 16px; }
+  h1 { font-size: 16px; font-weight: 600; margin: 0 0 8px; }
+  #view { width: 100%; aspect-ratio: 4 / 3; background: #000; display: block; cursor: grab; user-select: none;
+          touch-action: none; border-radius: 6px; }
+  .bar { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; align-items: center; }
+  button { background: #333; color: #ddd; border: 1px solid #555; border-radius: 4px; padding: 5px 10px; font: inherit;
+           cursor: pointer; }
+  button:hover { background: #444; }
+  #status { font: 12px ui-monospace, monospace; white-space: pre-wrap; background: #111; padding: 8px;
+            border-radius: 6px; min-height: 2.5em; }
+  .done { color: #7fd17f; font-weight: 600; }
+  .hint { color: #999; font-size: 12px; }
+</style></head>
+<body><main>
+<h1>Simulated __ROBOT__ (MuJoCo)</h1>
+<img id="view" src="stream" alt="Live view of the simulation" draggable="false">
+<div class="bar">
+  <button data-view="daz=-15">&#8592; orbit</button><button data-view="daz=15">orbit &#8594;</button>
+  <button data-view="del=-5">&#8593; up</button><button data-view="del=5">&#8595; down</button>
+  <button data-view="zoom=0.85">zoom in</button><button data-view="zoom=1.18">zoom out</button>
+  <button data-view="preset=front">front</button><button data-view="preset=top">top</button>
+  <button data-view="preset=side">side</button><button data-view="preset=table">table close-up</button>
+  <span class="hint">or drag the image to orbit, scroll to zoom</span>
+</div>
+<div id="status">waiting for the simulator...</div>
+</main>
+<script>
+const send = q => fetch("view?" + q).catch(() => {});
+document.querySelectorAll("[data-view]").forEach(b => b.onclick = () => send(b.dataset.view));
+const img = document.getElementById("view");
+let drag = null;
+img.addEventListener("pointerdown", e => { drag = [e.clientX, e.clientY]; img.setPointerCapture(e.pointerId); });
+img.addEventListener("pointerup", () => drag = null);
+img.addEventListener("pointermove", e => {
+  if (!drag) return;
+  const dx = e.clientX - drag[0], dy = e.clientY - drag[1];
+  if (Math.abs(dx) + Math.abs(dy) < 6) return;
+  drag = [e.clientX, e.clientY];
+  send("daz=" + (-dx * 0.4).toFixed(1) + "&del=" + (-dy * 0.4).toFixed(1));
+});
+img.addEventListener("wheel", e => { e.preventDefault(); send("zoom=" + (e.deltaY > 0 ? 1.1 : 0.9)); }, {passive: false});
+const status = document.getElementById("status");
+setInterval(() => fetch("status").then(r => r.json()).then(s => {
+  status.textContent = s.status || "waiting for the simulator...";
+  status.className = /IN THE BOX|BOX COVERED/.test(s.status) ? "done" : "";
+}).catch(() => status.textContent = "simulator not reachable"), 1000);
+</script></body></html>
+"""
+
+WEB_VIEW_SIZE = (960, 720)  # width, height of the web view (4:3, as the page shows it)
+# Web view presets: (azimuth, elevation, distance) around the table, looking at the box.
+WEB_VIEWS = {"front": (180, -25, 1.6), "top": (180, -85, 1.1), "side": (110, -20, 1.4), "table": (180, -45, 0.6)}
+
+
+def web_server(shared_qpos, shared_status, host: str, port: int, fps: float, robot: str, movable_base: bool):
+    """Child process: a web page with a live view of the simulation from a camera the viewer can move (orbit, zoom,
+    presets), and the status line. For remote servers without a screen: open it through an SSH tunnel."""
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from urllib.parse import parse_qs, urlparse
+
+    model, _ = build_model(robot, movable_base)
+    # This process's own model: its offscreen framebuffer is enlarged for the web view only.
+    model.vis.global_.offwidth, model.vis.global_.offheight = WEB_VIEW_SIZE
+    data = mujoco.MjData(model)
+    mujoco.mj_forward(model, data)
+    target = data.xpos[model.body("box").id] + [0, 0, 0.05]  # the box on the table
+    view = {}
+    view_lock = threading.Lock()
+    latest = {"jpg": None, "count": 0}
+    frame_ready = threading.Condition()
+
+    def set_preset(name):
+        view["az"], view["el"], view["dist"] = WEB_VIEWS[name]
+
+    set_preset("front")
+
+    def render_loop():
+        # The renderer's OpenGL context belongs to the thread that creates it: create and use it here only.
+        renderer = mujoco.Renderer(model, WEB_VIEW_SIZE[1], WEB_VIEW_SIZE[0])
+        renderer.scene.flags[mujoco.mjtRndFlag.mjRND_REFLECTION] = 0
+        camera = mujoco.MjvCamera()
+        camera.lookat[:] = target
+        encode_params = [cv2.IMWRITE_JPEG_QUALITY, 80]
+        while True:
+            start = time.perf_counter()
+            with shared_qpos.get_lock():
+                data.qpos[:] = shared_qpos[:]
+            mujoco.mj_forward(model, data)
+            with view_lock:
+                camera.azimuth, camera.elevation, camera.distance = view["az"], view["el"], view["dist"]
+            renderer.update_scene(data, camera=camera)
+            ok, jpg = cv2.imencode(".jpg", cv2.cvtColor(renderer.render(), cv2.COLOR_RGB2BGR), encode_params)
+            if ok:
+                with frame_ready:
+                    latest["jpg"], latest["count"] = jpg.tobytes(), latest["count"] + 1
+                    frame_ready.notify_all()
+            time.sleep(max(0, 1 / fps - (time.perf_counter() - start)))
+
+    class Handler(BaseHTTPRequestHandler):
+        def _send(self, body: bytes, content_type: str, status: int = 200):
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):  # noqa: N802
+            url = urlparse(self.path)
+            if url.path == "/":
+                self._send(WEB_PAGE.replace("__ROBOT__", "G1-D" if robot == "g1d" else "G1").encode(), "text/html")
+            elif url.path == "/status":
+                with shared_status.get_lock():
+                    text = shared_status.value.decode(errors="replace")
+                self._send(json.dumps({"status": text}).encode(), "application/json")
+            elif url.path == "/view":
+                query = {k: v[0] for k, v in parse_qs(url.query).items()}
+                try:
+                    with view_lock:
+                        if query.get("preset") in WEB_VIEWS:
+                            set_preset(query["preset"])
+                        view["az"] += float(query.get("daz", 0))
+                        view["el"] = float(np.clip(view["el"] + float(query.get("del", 0)), -89, 0))
+                        view["dist"] = float(np.clip(view["dist"] * float(query.get("zoom", 1)), 0.2, 4.0))
+                except ValueError:
+                    self._send(b"bad view parameter", "text/plain", 400)
+                    return
+                self._send(b"", "text/plain", 204)
+            elif url.path == "/stream":
+                # MJPEG: the browser shows each JPEG part as it arrives.
+                self.send_response(200)
+                self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                seen = -1
+                try:
+                    while True:
+                        with frame_ready:
+                            frame_ready.wait_for(lambda: latest["count"] != seen, timeout=5)
+                            jpg, seen = latest["jpg"], latest["count"]
+                        if jpg is None:
+                            continue
+                        self.wfile.write(b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: "
+                                         + str(len(jpg)).encode() + b"\r\n\r\n" + jpg + b"\r\n")
+                except (BrokenPipeError, ConnectionResetError):
+                    pass  # the browser closed the page
+            else:
+                self._send(b"not found", "text/plain", 404)
+
+        def log_message(self, format, *args):
+            pass
+
+    threading.Thread(target=render_loop, daemon=True).start()
+    server = ThreadingHTTPServer((host, port), Handler)
+    server.daemon_threads = True
+    print(f">>> Web view on http://{host}:{port} ({fps:g} fps).", flush=True)
+    parent_pid = os.getppid()
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        # Stop if the simulator dies without terminating this process (e.g. a crash).
+        while os.getppid() == parent_pid:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        pass
+
+
 def twin_follower(robot, twin_url: str, stop_event: threading.Event, rate_hz: float = 20):
     """Thread: poll the Cyber Twin's state and make the base, column and torso follow it."""
     url = twin_url.rstrip("/") + "/api/robot"
@@ -791,6 +963,18 @@ def main():
         help="G1-D only: URL of the DGS Cyber Twin (e.g. http://127.0.0.1:3000). The base, wheels, column and "
         "torso then follow the twin's state, so base and column commands allowed by its PEP move the robot.",
     )
+    parser.add_argument(
+        "--web_port",
+        type=int,
+        default=None,
+        help="Serve a web page with a live view of the simulation (camera you can orbit and zoom) and the status "
+        "line on this port, e.g. 8080. For a server without a screen: use with --headless and open it through an "
+        "SSH tunnel (ssh -N -L 8080:127.0.0.1:8080 user@server, then http://localhost:8080).",
+    )
+    parser.add_argument("--web_host", type=str, default="127.0.0.1",
+                        help="Address the web view listens on. The default accepts only local connections (and SSH "
+                        "tunnels); 0.0.0.0 opens it to the network, with no password.")
+    parser.add_argument("--web_fps", type=float, default=15, help="Frame rate of the web view.")
     args = parser.parse_args()
     if args.twin_url and args.robot != "g1d":
         parser.error("--twin_url needs --robot g1d")
@@ -812,6 +996,18 @@ def main():
             daemon=True,
         )
         camera_process.start()
+
+    # Latest status line, read by the web view.
+    shared_status = ctx.Array("c", 2048)
+    web_process = None
+    if args.web_port:
+        web_process = ctx.Process(
+            target=web_server,
+            args=(shared_qpos, shared_status, args.web_host, args.web_port, args.web_fps, args.robot,
+                  bool(args.twin_url)),
+            daemon=True,
+        )
+        web_process.start()
 
     viewer = None
     if not args.headless:
@@ -862,21 +1058,27 @@ def main():
                 num_lowcmd, num_gripper_cmd = robot.counters()
                 arm_q = robot.joint_q()[ARM_JOINT_INDICES]
                 grippers = [round(robot.gripper_q(side)[0], 2) for side in GRIPPER_SIDES]
+                objects = robot.objects_status()
                 print(
                     f"real-time x{realtime:.2f} | lowcmd msgs: {num_lowcmd} | gripper cmd msgs: {num_gripper_cmd} | "
-                    f"arm q: {np.round(arm_q, 2)} | grippers: {grippers} | {robot.objects_status()}"
+                    f"arm q: {np.round(arm_q, 2)} | grippers: {grippers} | {objects}"
                     + (" | base x {:.2f} y {:.2f} yaw {:.2f} column {:.3f}".format(*robot.base_pose()) if args.twin_url else ""),
                     flush=True,
                 )
+                status = (f"{objects}\ngrippers (left, right; 0 closed, 5.4 open): {grippers} | "
+                          f"commands received: {num_lowcmd} arm, {num_gripper_cmd} gripper | real-time x{realtime:.2f}")
+                with shared_status.get_lock():
+                    shared_status.value = status.encode()[: len(shared_status) - 1]
     except KeyboardInterrupt:
         pass
     finally:
         stop_event.set()
         if viewer is not None:
             viewer.close()
-        if camera_process is not None:
-            camera_process.terminate()
-            camera_process.join(timeout=2)
+        for process in (camera_process, web_process):
+            if process is not None:
+                process.terminate()
+                process.join(timeout=2)
         print(">>> Simulated G1 stopped.", flush=True)
         # Skip interpreter teardown: the DDS threads crash the process on a normal exit.
         os._exit(0)

@@ -43,6 +43,11 @@ cd ~/projects/unifolm-wma-postino/unitree_deploy/scripts
 The mock model, the replay server and the SSH tunnel to EC2 all use port 8000:
 run **only one** of them.
 
+In any setup, add `--web_port 8080` to the `sim_g1_robot.py` command to also
+watch the simulation in a browser at http://localhost:8080 (movable view and
+status line; with `--headless` it works on a server without a screen, see
+*Optional: watch the simulation in a browser* below).
+
 ### A. Simulator + mock model (3 terminals)
 
 ```bash
@@ -235,6 +240,26 @@ In another laptop terminal (same `conda activate` and `cd`):
 ```bash
 python view_camera_stream.py      # Esc to close
 ```
+
+### Optional: watch the simulation in a browser (also on a remote server)
+
+`--web_port` adds a web page with a live view of the simulation, from a
+camera you can move (drag to orbit, scroll to zoom, or the front / top / side
+/ table close-up buttons), and the status line (green once `IN THE BOX` /
+`BOX COVERED`). It works without a screen, so the simulator can run on a
+server:
+
+```bash
+# On the machine running the simulator (--headless if it has no screen)
+python sim_g1_robot.py --robot g1d --headless --web_port 8080
+
+# On your laptop, if the simulator runs on a server: tunnel the port, leave it open
+ssh -N -L 8080:127.0.0.1:8080 ubuntu@SERVER_IP
+```
+
+Then open http://localhost:8080. By default the page only accepts local
+connections (and SSH tunnels); `--web_host 0.0.0.0` opens it to the network,
+without a password. `--web_fps` sets its frame rate (default 15).
 
 ### Common messages
 
@@ -469,7 +494,8 @@ physics instead of copying the commanded positions:
   case: a missed grasp stays missed.
 - **Cameras:** a stereo head camera and one camera per wrist, streamed on
   `tcp://*:5555` in the same format as the robot's image server. The model
-  receives the right head image.
+  receives the right head image. With `--web_port`, also a web page with a
+  movable view and the status line (see *watch the simulation in a browser*).
 - **Scene:** made to look like the real "pack black camera into box" setup
   of Unitree's dataset (G1_Dex1_MountCameraRedGripper): a white table with a
   flat black camera with a blue screen (robot's right), a white tray with a
