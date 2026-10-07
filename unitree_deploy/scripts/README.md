@@ -454,13 +454,21 @@ physics instead of copying the commanded positions:
 - **Cameras:** a stereo head camera and one camera per wrist, streamed on
   `tcp://*:5555` in the same format as the robot's image server. The model
   receives the right head image.
-- **Scene:** laid out from the real "pack black camera into box" episode used
-  by `replay_policy_server.py`: a black camera (on the robot's right), an open
-  box (centre) and a black case (left), placed where the recorded grippers
-  close and open, and sized so the fingers grip them. The table is at the
-  height the recorded hands reach. Both arms start at the task's start pose
-  (the zero pose would go through the table). The status line every 2 s shows
-  where the camera is and `IN THE BOX` once it is packed.
+- **Scene:** made to look like the real "pack black camera into box" setup
+  of Unitree's dataset (G1_Dex1_MountCameraRedGripper): a white table with a
+  flat black camera with a blue screen (robot's right), a white tray with a
+  black rim (the box, centre) and a black case with a blue strip (the lid,
+  left), sizes measured in the dataset images; dark grey floor. The objects
+  are placed where the grippers of the recorded episode used by
+  `replay_policy_server.py` close and open, so the replay packs the camera.
+  The table is at the height the recorded hands reach. Both arms start at the
+  task's start pose (the zero pose would go through the table). The status
+  line every 2 s shows where the camera is and `IN THE BOX` once packed.
+- **Head camera and grippers calibrated on the real robot:** the head
+  cameras' position, angle (57° down) and field of view (60°), and the Dex1
+  finger length, were fitted so that the simulated red finger tips land on
+  the real ones in 33 frames of each dataset camera, at the recorded joint
+  angles (median error 8 pixels).
 
 - **Base following the twin:** with `--robot g1d --twin_url http://127.0.0.1:3000`
   the G1-D's base (x, y, rotation), wheels, column and torso follow the Cyber

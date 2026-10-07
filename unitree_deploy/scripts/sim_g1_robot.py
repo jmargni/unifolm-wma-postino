@@ -80,8 +80,19 @@ GRIPPER_SIDES = ("left", "right")
 MODE_MACHINE = 5  # g1_29dof_rev_1_0, see assets/g1/README.md
 
 # Gripper: the Dex1 command range [0, GRIPPER_Q_MAX] maps to a travel of [0, FINGER_TRAVEL] metres per finger.
+# Finger pads along the wrist's x axis, from FINGER_X - FINGER_HALF_LENGTH to FINGER_X + FINGER_HALF_LENGTH (m).
+FINGER_X, FINGER_HALF_LENGTH, FINGER_TIP_X = 0.1225, 0.0225, 0.133
+GRIPPER_YELLOW = [0.95, 0.75, 0.1, 1]
+FINGER_TIP_RED = [0.85, 0.1, 0.08, 1]
 GRIPPER_Q_MAX = 5.45
 FINGER_TRAVEL = 0.04
+
+# Head stereo camera (torso frame), calibrated from the G1_Dex1_MountCameraRedGripper dataset: the red finger tips
+# in 33 real frames of each view against the simulated arms at the recorded joint angles (median error 8 px).
+HEAD_CAMERAS = {
+    "head_left": ([0.0798, 0.0038, 0.4744], [0.7059, 0.2019, -0.1938, -0.6506], 60.3),
+    "head_right": ([0.0789, -0.0048, 0.4728], [0.6868, 0.1829, -0.2218, -0.6675], 60.4),
+}
 
 # Arm pose at start-up, held until the first rt/lowcmd: the first pose of the recorded "pack black camera into
 # box" episode, the same as robot_client.py's INIT_POSE for g1_dex1. (The zero pose would go through the table.)
@@ -117,7 +128,8 @@ def _camera_quat(pitch_down_deg):
 
 
 def _add_gripper(spec, side):
-    """Replace the rubber hand of one wrist by a two-finger gripper and a wrist camera."""
+    """Replace the rubber hand of one wrist by a two-finger gripper and a wrist camera. Proportions of the real
+    Dex1: the red finger tips are 0.133 m from the wrist, as calibrated from the dataset's head-camera images."""
     wrist = spec.body(f"{side}_wrist_yaw_link")
     for geom in list(wrist.geoms):
         if geom.meshname.endswith("rubber_hand"):
@@ -129,10 +141,10 @@ def _add_gripper(spec, side):
         pos=[0.075, 0, 0],
         size=[0.02, 0.04, 0.022],
         mass=0.3,
-        rgba=[0.15, 0.15, 0.15, 1],
+        rgba=GRIPPER_YELLOW,
     )
     for finger, sign in (("a", 1), ("b", -1)):
-        body = wrist.add_body(name=f"{side}_finger_{finger}", pos=[0.125, sign * 0.006, 0])
+        body = wrist.add_body(name=f"{side}_finger_{finger}", pos=[FINGER_X, sign * 0.006, 0])
         body.add_joint(
             name=f"{side}_finger_{finger}_joint",
             type=mujoco.mjtJoint.mjJNT_SLIDE,
@@ -142,12 +154,15 @@ def _add_gripper(spec, side):
         )
         body.add_geom(
             type=mujoco.mjtGeom.mjGEOM_BOX,
-            size=[0.03, 0.005, 0.018],
+            size=[FINGER_HALF_LENGTH, 0.005, 0.018],
             mass=0.05,
             friction=[1.5, 0.01, 0.001],
             condim=4,
-            rgba=[0.3, 0.3, 0.3, 1],
+            rgba=[0.12, 0.12, 0.12, 1],
         )
+        # Red rubber tip (visual only), where the real Dex1 has it.
+        body.add_geom(type=mujoco.mjtGeom.mjGEOM_ELLIPSOID, pos=[FINGER_TIP_X - FINGER_X, 0, 0],
+                      size=[0.014, 0.0065, 0.012], contype=0, conaffinity=0, mass=0.001, rgba=FINGER_TIP_RED)
         actuator = spec.add_actuator(
             name=f"{side}_finger_{finger}",
             target=f"{side}_finger_{finger}_joint",
@@ -163,26 +178,28 @@ def _add_gripper(spec, side):
     wrist.add_camera(name=f"{side}_wrist", pos=[0.04, 0, 0.045], quat=_camera_quat(15), fovy=90)
 
 
-# Scene of the "pack black camera into box" task, laid out from the real recorded episode replayed by
-# replay_policy_server.py (replay_data/g1_pack_camera_ep0.npz): each object is where a gripper closes on it,
-# sized so the fingers close on it as far as they do in the recording. Positions are relative to torso_link,
-# whose height and arms are the same on the G1 and G1-D (x forward, y left, z up; m and degrees).
-PACK_TABLE_TOP = 0.030  # 4 mm below the lowest point the arms reach in the episode
-# Objects are as tall as needed for their middle to be at the height where the fingers close (about 4 cm above the
-# table): gripped by the top edge only, they slip out when lifted.
-PACK_CAMERA = dict(pos=(0.286, -0.143), yaw=-27, half=(0.015, 0.032, 0.035))  # right hand: 30 mm between fingers
-PACK_BOX = dict(pos=(0.248, -0.045), inner_half=(0.048, 0.042), wall_height=0.015, wall=0.004)  # right hand opens
-PACK_CASE = dict(pos=(0.284, 0.145), yaw=15, half=(0.026, 0.022, 0.035))  # left hand: 52 mm between fingers
+# Scene of the "pack black camera into box" task. Objects have the size and look of the real ones (measured in the
+# G1_Dex1_MountCameraRedGripper dataset images with the calibrated head camera) and are placed where the grippers of
+# the recorded episode replayed by replay_policy_server.py (replay_data/g1_pack_camera_ep0.npz) close and open.
+# Positions are relative to torso_link, which is at the same height on the G1 and G1-D (x forward, y left, z up;
+# m and degrees; yaw = turn about z of the object's x axis).
+PACK_TABLE_TOP = 0.036  # just below the lowest the finger pads reach over the table
+PACK_CAMERA = dict(pos=(0.286, -0.144), yaw=-27.6, half=(0.015, 0.039, 0.011))  # 7.8 x 3.0 x 2.2 cm; right hand closes
+PACK_BOX = dict(pos=(0.248, -0.035), inner_half=(0.019, 0.042), wall_height=0.025, wall=0.004)  # white tray, 9.2 x 4.6 cm
+PACK_CASE = dict(pos=(0.284, 0.149), yaw=15.8, half=(0.026, 0.052, 0.020))  # 10.4 x 5.2 x 4 cm; left hand closes
+TABLE_WHITE = [0.86, 0.86, 0.84, 1]
+SCENE_HEADLIGHT, SCENE_LIGHT = 0.2, 0.1
+OBJECT_BLACK = [0.04, 0.04, 0.05, 1]
 
 
 def _yaw_quat(deg):
     return [np.cos(np.deg2rad(deg) / 2), 0, 0, np.sin(np.deg2rad(deg) / 2)]
 
 
-def _add_open_box(body, half_x, half_y, height, wall, mass, rgba):
+def _add_open_box(body, half_x, half_y, height, wall, mass, rgba, inside_rgba=None):
     """Open-top box made of a floor and four walls, with its bottom at the body origin."""
     body.add_geom(type=mujoco.mjtGeom.mjGEOM_BOX, pos=[0, 0, wall / 2], size=[half_x + wall, half_y + wall, wall / 2],
-                  mass=mass / 5, rgba=rgba)
+                  mass=mass / 5, rgba=inside_rgba or rgba)
     for pos, size in (
         ([half_x + wall / 2, 0, height / 2], [wall / 2, half_y + wall, height / 2]),
         ([-half_x - wall / 2, 0, height / 2], [wall / 2, half_y + wall, height / 2]),
@@ -193,47 +210,56 @@ def _add_open_box(body, half_x, half_y, height, wall, mass, rgba):
 
 
 def _add_scene(spec, torso_x, torso_z):
-    """Table with the black camera (right), the open box (centre) and a black case (left), placed relative to
-    the robot's torso as in the recorded "pack black camera into box" episode."""
+    """White table with the black camera (right), the white tray (centre) and the black case (left), placed
+    relative to the robot's torso as in the recorded "pack black camera into box" episode."""
     world = spec.worldbody
     world.add_light(pos=[0.6, 0, 2.5], dir=[0, 0, -1], diffuse=[0.3, 0.3, 0.3])
     top = torso_z + PACK_TABLE_TOP
 
     # Table in front of the robot.
-    table_size = [0.25, 0.5, 0.02]
+    table_size = [0.3, 0.6, 0.02]
     table_x = torso_x + 0.15 + table_size[0]
     world.add_geom(name="table_top", type=mujoco.mjtGeom.mjGEOM_BOX, pos=[table_x, 0, top - table_size[2]],
-                   size=table_size, rgba=[0.55, 0.4, 0.28, 1])
+                   size=table_size, rgba=TABLE_WHITE)
+    # Visual-only extension towards the robot: in the real images the table runs under the arms.
+    world.add_geom(type=mujoco.mjtGeom.mjGEOM_BOX, pos=[torso_x + 0.1, 0, top - 0.001], size=[0.05, table_size[1], 0.001],
+                   contype=0, conaffinity=0, rgba=TABLE_WHITE)
     for x in (table_x - table_size[0] + 0.03, table_x + table_size[0] - 0.03):
         for y in (-table_size[1] + 0.03, table_size[1] - 0.03):
             world.add_geom(type=mujoco.mjtGeom.mjGEOM_BOX, pos=[x, y, (top - 0.04) / 2],
-                           size=[0.02, 0.02, (top - 0.04) / 2], rgba=[0.4, 0.3, 0.2, 1])
+                           size=[0.02, 0.02, (top - 0.04) / 2], rgba=[0.3, 0.3, 0.32, 1])
 
     def place(spec_):
         return [torso_x + spec_["pos"][0], spec_["pos"][1]]
 
-    # Black camera, picked up by the right hand: its narrow side faces the closing fingers.
+    # Black camera, picked up by the right hand: its narrow side faces the closing fingers. Screen at one end.
     half = PACK_CAMERA["half"]
     camera = world.add_body(name="black_camera", pos=[*place(PACK_CAMERA), top + half[2]],
                             quat=_yaw_quat(PACK_CAMERA["yaw"]))
     camera.add_freejoint()
-    camera.add_geom(type=mujoco.mjtGeom.mjGEOM_BOX, size=half, mass=0.08, friction=[1.2, 0.01, 0.001],
-                    rgba=[0.05, 0.05, 0.05, 1])
-    camera.add_geom(type=mujoco.mjtGeom.mjGEOM_CYLINDER, pos=[0, -half[1] - 0.004, 0], quat=[0.7071068, 0.7071068, 0, 0],
-                    size=[0.011, 0.004], mass=0.005, rgba=[0.2, 0.2, 0.25, 1])
+    camera.add_geom(type=mujoco.mjtGeom.mjGEOM_BOX, size=half, mass=0.06, friction=[1.2, 0.01, 0.001],
+                    rgba=OBJECT_BLACK)
+    camera.add_geom(type=mujoco.mjtGeom.mjGEOM_BOX, pos=[0, -half[1] + 0.012, half[2]], size=[half[0] - 0.003, 0.010, 0.0006],
+                    contype=0, conaffinity=0, mass=0.001, rgba=[0.65, 0.72, 1.0, 1])
 
-    # Open box, where the right hand releases the camera.
+    # White tray with a black rim, where the right hand releases the camera.
     box = world.add_body(name="box", pos=[*place(PACK_BOX), top])
     box.add_freejoint()
-    _add_open_box(box, *PACK_BOX["inner_half"], PACK_BOX["wall_height"], PACK_BOX["wall"], mass=0.15,
-                  rgba=[0.72, 0.55, 0.35, 1])
+    _add_open_box(box, *PACK_BOX["inner_half"], PACK_BOX["wall_height"], PACK_BOX["wall"], mass=0.1,
+                  rgba=[0.95, 0.95, 0.95, 1], inside_rgba=[0.97, 0.97, 0.97, 1])
+    hx, hy = (h + PACK_BOX["wall"] for h in PACK_BOX["inner_half"])
+    for pos, size in (([hx, 0], [0.0025, hy]), ([-hx, 0], [0.0025, hy]), ([0, hy], [hx, 0.0025]), ([0, -hy], [hx, 0.0025])):
+        box.add_geom(type=mujoco.mjtGeom.mjGEOM_BOX, pos=[*pos, PACK_BOX["wall_height"]], size=[*size, 0.0015],
+                     contype=0, conaffinity=0, mass=0.001, rgba=OBJECT_BLACK)
 
-    # Black case, moved by the left hand next to the box.
+    # Black case (the lid), with the blue window strip of the real one on top.
     half = PACK_CASE["half"]
     case = world.add_body(name="black_case", pos=[*place(PACK_CASE), top + half[2]], quat=_yaw_quat(PACK_CASE["yaw"]))
     case.add_freejoint()
     case.add_geom(type=mujoco.mjtGeom.mjGEOM_BOX, size=half, mass=0.1, friction=[1.2, 0.01, 0.001],
-                  rgba=[0.08, 0.08, 0.1, 1])
+                  rgba=[0.06, 0.06, 0.08, 1])
+    case.add_geom(type=mujoco.mjtGeom.mjGEOM_BOX, pos=[0, 0, half[2]], size=[half[0] * 0.45, half[1] * 0.85, 0.0006],
+                  contype=0, conaffinity=0, mass=0.001, rgba=[0.25, 0.3, 0.55, 1])
 
 
 def _g1_spec():
@@ -256,6 +282,12 @@ def _g1_spec():
             texture.rgb1 = [0.75, 0.78, 0.8]
             texture.rgb2 = [0.45, 0.48, 0.5]
             texture.builtin = mujoco.mjtBuiltin.mjBUILTIN_GRADIENT
+        elif texture.name == "groundplane":
+            # Plain dark grey floor, like the lab floor in the dataset images.
+            texture.builtin = mujoco.mjtBuiltin.mjBUILTIN_FLAT
+            texture.rgb1 = texture.rgb2 = [0.17, 0.17, 0.17]
+            texture.mark = mujoco.mjtMark.mjMARK_NONE
+    spec.material("groundplane").reflectance = 0
     return spec, body_joints
 
 
@@ -270,9 +302,8 @@ G1D_WORLD_XML = """
   </visual>
   <asset>
     <texture type="skybox" builtin="gradient" rgb1="0.75 0.78 0.8" rgb2="0.45 0.48 0.5" width="512" height="3072"/>
-    <texture type="2d" name="groundplane" builtin="checker" mark="edge" rgb1="0.2 0.3 0.4" rgb2="0.1 0.2 0.3"
-             markrgb="0.8 0.8 0.8" width="300" height="300"/>
-    <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="5 5" reflectance="0.2"/>
+    <texture type="2d" name="groundplane" builtin="flat" rgb1="0.17 0.17 0.17" rgb2="0.17 0.17 0.17" width="300" height="300"/>
+    <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="5 5" reflectance="0"/>
   </asset>
   <worldbody>
     <light pos="1 0 3.5" dir="0 0 -1" directional="true"/>
@@ -360,8 +391,8 @@ def build_model(robot="g1", movable_base=False):
 
     # Stereo camera in the face, 6 cm apart, looking down at the table.
     torso = spec.body("torso_link")
-    for name, y in (("head_left", 0.03), ("head_right", -0.03)):
-        torso.add_camera(name=name, pos=[0.08, y, 0.38], quat=_camera_quat(50), fovy=65)
+    for name, (pos, quat, fovy) in HEAD_CAMERAS.items():
+        torso.add_camera(name=name, pos=pos, quat=quat, fovy=fovy)
 
     for side in GRIPPER_SIDES:
         _add_gripper(spec, side)
@@ -374,6 +405,14 @@ def build_model(robot="g1", movable_base=False):
             for name in G1D_BASE_BODIES:
                 for geom in spec.body(name).geoms:
                     geom.contype = geom.conaffinity = 0
+
+    # Softer lighting: the white table renders light grey as in the dataset images instead of saturating.
+    spec.visual.headlight.diffuse = [SCENE_HEADLIGHT] * 3
+    spec.visual.headlight.ambient = [0.25, 0.25, 0.25]
+    spec.visual.headlight.specular = [0.1, 0.1, 0.1]
+    for light in spec.lights:
+        light.diffuse = [SCENE_LIGHT] * 3
+        light.specular = [0.1, 0.1, 0.1]
 
     spec.option.timestep = 0.002
     return spec.compile(), body_joints
