@@ -91,8 +91,15 @@ pose and hold (13.5 s recorded; the loop runs slower than real time, about
 the simulator to put the camera back on the table. The replay server prints
 the episode step it is playing. For any instruction other than "pack black
 camera into box" the robot holds still, like a model that does not know the
-task. `--full` plays the rest of the recording too (the left hand moves the
-black case next to the box, which can knock the camera out in the simulator).
+task.
+
+For the **full packing**, start the replay server with `--cover`: after the
+camera, the left hand picks up the black case, a lid, and puts it down over
+the box (about 30 s recorded, about 2.5 minutes in the loop). The status line
+then shows `IN THE BOX` and `BOX COVERED`. In this mode the case carry is
+re-planned for the simulator (see *Full packing* in section 9); the rest is
+the recording. `--full` plays the whole recording unchanged instead (in the
+simulator the case then ends next to the box).
 
 Start the twin before the client: without it the robot never moves. With
 `--twin_url`, the simulator also follows the twin's base: base and column
@@ -109,7 +116,7 @@ The simplest way to see the robot pack the camera:
 # Terminal 1 - simulator with the G1-D (a MuJoCo window opens)
 python sim_g1_robot.py --robot g1d
 
-# Terminal 2 - replay model
+# Terminal 2 - replay model (camera only; add --cover for the full packing)
 python replay_policy_server.py
 
 # Terminal 3 - client, without PEP
@@ -117,8 +124,9 @@ UNITREE_IMAGE_SERVER=127.0.0.1 python robot_client.py --control_freq 15
 ```
 
 The robot starts immediately (nothing to arm) and nothing is checked. After
-about 2 minutes the simulator prints `IN THE BOX`. To run it again, restart
-the simulator and the replay server.
+about 2 minutes the simulator prints `IN THE BOX`; with `--cover`, after about
+2.5 minutes also `BOX COVERED`. To run it again, restart the simulator and the
+replay server.
 
 ### C. G1-D simulator + real model on EC2 + Cyber Twin PEP
 
@@ -450,20 +458,43 @@ physics instead of copying the commanded positions:
   controller, which is not simulated, so the pelvis is fixed in place.
 - **Grippers:** simplified two-finger grippers. The Dex1 opening (0 = closed,
   5.45 = open) maps to 0-4 cm of travel per finger. They stop when they close
-  on an object.
+  on an object. The wrist and gripper weigh what `robot_client.py`'s arm model
+  assumes (0.78 kg), so its gravity torques hold the arms where it expects.
+- **Sticky grasp:** the simulated finger pads touch an object at a few points
+  only, so the case could pivot and slip out where the real rubber fingertips
+  hold it. When a gripper closes on the case and its fingers are stopped by
+  it, the case is fixed to the hand until the gripper has opened again (the
+  camera is held by friction: it pivots a little in the hand, as the real one,
+  and so drops flat into the box). The fingers must still close around the
+  case: a missed grasp stays missed.
 - **Cameras:** a stereo head camera and one camera per wrist, streamed on
   `tcp://*:5555` in the same format as the robot's image server. The model
   receives the right head image.
 - **Scene:** made to look like the real "pack black camera into box" setup
   of Unitree's dataset (G1_Dex1_MountCameraRedGripper): a white table with a
   flat black camera with a blue screen (robot's right), a white tray with a
-  black rim (the box, centre) and a black case with a blue strip (the lid,
-  left), sizes measured in the dataset images; dark grey floor. The objects
-  are placed where the grippers of the recorded episode used by
+  black rim (the box, centre, fixed on the table) and a black case with a blue
+  strip (left): a lid open at the bottom, wide enough to go down over the box
+  (5 mm clearance per side). Sizes measured in the dataset images (the box
+  inside 3.8 x 8.6 cm, the lid 5.8 x 10.6 x 4 cm, a little larger than
+  measured so the lid fits over the box); dark grey floor. The objects are
+  placed where the grippers of the recorded episode used by
   `replay_policy_server.py` close and open, so the replay packs the camera.
   The table is at the height the recorded hands reach. Both arms start at the
   task's start pose (the zero pose would go through the table). The status
-  line every 2 s shows where the camera is and `IN THE BOX` once packed.
+  line every 2 s shows where the camera and the case are, `IN THE BOX` once
+  the camera is packed and `BOX COVERED` once the lid is down around the box.
+- **Full packing (`replay_policy_server.py --cover`):** on the real robot the
+  recording also puts the lid over the box; in the simulator (slightly
+  different arm, objects and grip) the recorded left arm carries it low, into
+  the box's side, and sets it down beside it. `make_cover_episode.py` makes
+  `replay_data/g1_pack_camera_ep0_cover.npz`: the recording with the left
+  hand's lid carry re-planned (lift it clear, carry it over the box turning it
+  level and in line, open the gripper just above the rim so the lid drops
+  down around the box, withdraw), and the right hand moved up and away from
+  the box after dropping the camera, by inverse kinematics on the simulated
+  arms. The grasps and gripper timing stay as recorded. Run it again after
+  changing the scene.
 - **Head camera and grippers calibrated on the real robot:** the head
   cameras' position, angle (57° down) and field of view (60°), and the Dex1
   finger length, were fitted so that the simulated red finger tips land on

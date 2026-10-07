@@ -18,8 +18,13 @@ PEP checks.
   pose, so the robot holds still, as a model that does not know the task.
 - By default it plays the first part of the episode, the camera packing: the
   right hand picks up the camera and puts it into the box (13.5 s recorded).
-  With --full it plays the whole episode, where the left hand then also moves a
-  black case next to the box (in the simulator this can knock the camera out).
+- With --cover it plays the whole sequence: after the camera packing, the left
+  hand picks up the black case and lays it on the box as a cover. The case
+  carry is re-planned for the simulator (replay_data/
+  g1_pack_camera_ep0_cover.npz, made by make_cover_episode.py): the recorded
+  joint angles would set it down beside the box there. The rest is as recorded.
+- With --full it plays the whole recording unchanged (in the simulator the case
+  ends next to the box).
 - At the end it brings the arms back to the start pose at a gentle speed and
   holds them there; with --loop it then plays again (in the simulator, restart
   it to put the camera back on the table).
@@ -40,7 +45,10 @@ import numpy as np
 
 ACTION_CHUNK = 16  # the client hard-codes 16 predicted future steps
 DEFAULT_EPISODE = Path(__file__).resolve().parent / "replay_data" / "g1_pack_camera_ep0.npz"
+# The whole episode with the left hand's case carry re-planned for the simulator (make_cover_episode.py).
+COVER_EPISODE = Path(__file__).resolve().parent / "replay_data" / "g1_pack_camera_ep0_cover.npz"
 SEARCH_BACK, SEARCH_AHEAD = 8, 40  # episode steps around the last position searched for the robot's pose
+GRIPPER_WEIGHT = 0.1  # rad per unit of gripper opening, when comparing the robot's pose with the episode's
 RETURN_SPEED = 1.0  # rad/s, arm speed when moving back to the start pose
 PACKING_END = 13.5  # s of the recording: camera released into the box and right hand lifted away
 AT_START = 0.05  # rad, max joint distance to the start pose to restart the episode
@@ -108,9 +116,12 @@ class ReplayPolicy:
                     actions[k] = pose
                 return actions, "returning to the start pose"
 
-        # Where is the robot in the episode? Nearest recorded arm pose around the last position.
+        # Where is the robot in the episode? Nearest recorded pose around the last position: the arm joints, and the
+        # gripper openings (scaled down: 0-5.4) so that while an arm holds still, before and after a gripper opens
+        # or closes are told apart.
         lo, hi = max(0, self.index - SEARCH_BACK), min(last, self.index + SEARCH_AHEAD)
-        distances = np.abs(self.states[lo : hi + 1, :14] - current[:14]).max(axis=1)
+        distances = np.maximum(np.abs(self.states[lo : hi + 1, :14] - current[:14]).max(axis=1),
+                               GRIPPER_WEIGHT * np.abs(self.states[lo : hi + 1, 14:16] - current[14:16]).max(axis=1))
         self.index = lo + int(np.argmin(distances))
 
         if self.index + ACTION_CHUNK > last:
@@ -158,11 +169,17 @@ def main():
                         help="Recorded frames per action: 2 plays the 30 fps recording at the client's 15 Hz.")
     parser.add_argument("--loop", action="store_true", help="Play the episode again after returning to the start.")
     parser.add_argument("--full", action="store_true",
-                        help="Play the whole episode (camera packing, then the left hand moving the black case).")
+                        help="Play the whole recording unchanged (camera packing, then the left hand moving the black "
+                        "case; in the simulator the case ends next to the box).")
+    parser.add_argument("--cover", action="store_true",
+                        help="Play the whole sequence with the case carry re-planned for the simulator: the camera "
+                        "goes into the box and the case is laid on it as a cover.")
     parser.add_argument("--accept", action="append", default=[],
                         help="Another instruction to treat as the episode's task (repeatable).")
     args = parser.parse_args()
 
+    if args.cover:
+        args.episode, args.full = COVER_EPISODE, True
     policy = ReplayPolicy(args.episode, args.stride, args.loop, args.accept, args.full)
     server = ThreadingHTTPServer((args.host, args.port), make_handler(policy))
     print(f">>> Replay policy server is ready on http://{args.host}:{args.port} ...", flush=True)

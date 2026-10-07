@@ -90,6 +90,14 @@ FINGER_TRAVEL = 0.04
 # the measured opening, so a held object is squeezed by kp x 1.3 mm per finger: stiff enough to carry the camera.
 FINGER_KP, FINGER_KV = 3000, 25
 WRIST_GRIPPER_MASS, FINGER_MASS = 0.781, 0.051  # kg; a finger = pad + red tip
+# Finger pad contact: sliding, torsional and rolling friction; condim 4 = sliding + torsional.
+FINGER_FRICTION, FINGER_CONDIM = [1.5, 0.01, 0.001], 4
+# Objects a gripper holds rigidly once closed on them (StickyGrasp), and the commanded opening below which a gripper
+# counts as closing. Only the case: the camera is held by the fingers' friction, as it pivots a little in the real
+# hand and so drops flat into the box (held rigidly, it hung tilted with the wrist and landed on its side).
+GRASP_OBJECTS = ("black_case",)
+GRASP_CLOSED_BELOW = 4.0
+GRASP_RELEASE_CLEARANCE = 0.3  # Dex1 units the fingers open beyond the grasp before the object is let go
 
 # Head stereo camera (torso frame), calibrated from the G1_Dex1_MountCameraRedGripper dataset: the red finger tips
 # in 33 real frames of each view against the simulated arms at the recorded joint angles (median error 8 px).
@@ -170,8 +178,8 @@ def _add_gripper(spec, side):
             type=mujoco.mjtGeom.mjGEOM_BOX,
             size=[FINGER_HALF_LENGTH, 0.005, 0.018],
             mass=FINGER_MASS - 0.001,
-            friction=[1.5, 0.01, 0.001],
-            condim=4,
+            friction=FINGER_FRICTION,
+            condim=FINGER_CONDIM,
             rgba=[0.12, 0.12, 0.12, 1],
         )
         # Red rubber tip (visual only), where the real Dex1 has it.
@@ -199,8 +207,10 @@ def _add_gripper(spec, side):
 # m and degrees; yaw = turn about z of the object's x axis).
 PACK_TABLE_TOP = 0.036  # just below the lowest the finger pads reach over the table
 PACK_CAMERA = dict(pos=(0.286, -0.144), yaw=-27.6, half=(0.015, 0.039, 0.011))  # 7.8 x 3.0 x 2.2 cm; right hand closes
-PACK_BOX = dict(pos=(0.248, -0.035), inner_half=(0.019, 0.042), wall_height=0.025, wall=0.004)  # white tray, 9.2 x 4.6 cm
-PACK_CASE = dict(pos=(0.284, 0.149), yaw=15.8, half=(0.026, 0.052, 0.020))  # 10.4 x 5.2 x 4 cm; left hand closes
+PACK_BOX = dict(pos=(0.248, -0.035), inner_half=(0.019, 0.043), wall_height=0.028, wall=0.003)  # white tray, 9.2 x 4.4 cm
+# The case is a lid, open at the bottom, that goes down over the tray: its inside is ~5 mm wider than the tray on each
+# side. 10.6 x 5.8 x 4 cm; the left hand closes on it.
+PACK_CASE = dict(pos=(0.284, 0.149), yaw=15.8, half=(0.029, 0.053, 0.020), wall=0.002, top=0.003)
 TABLE_WHITE = [0.86, 0.86, 0.84, 1]
 SCENE_HEADLIGHT, SCENE_LIGHT = 0.2, 0.1
 OBJECT_BLACK = [0.04, 0.04, 0.05, 1]
@@ -256,9 +266,9 @@ def _add_scene(spec, torso_x, torso_z):
     camera.add_geom(type=mujoco.mjtGeom.mjGEOM_BOX, pos=[0, -half[1] + 0.012, half[2]], size=[half[0] - 0.003, 0.010, 0.0006],
                     contype=0, conaffinity=0, mass=0.001, rgba=[0.65, 0.72, 1.0, 1])
 
-    # White tray with a black rim, where the right hand releases the camera.
+    # White tray with a black rim, where the right hand releases the camera. Fixed on the table, so the lid laid over
+    # it by a replayed (open-loop) motion finds it in the same place every time.
     box = world.add_body(name="box", pos=[*place(PACK_BOX), top])
-    box.add_freejoint()
     _add_open_box(box, *PACK_BOX["inner_half"], PACK_BOX["wall_height"], PACK_BOX["wall"], mass=0.1,
                   rgba=[0.95, 0.95, 0.95, 1], inside_rgba=[0.97, 0.97, 0.97, 1])
     hx, hy = (h + PACK_BOX["wall"] for h in PACK_BOX["inner_half"])
@@ -266,12 +276,21 @@ def _add_scene(spec, torso_x, torso_z):
         box.add_geom(type=mujoco.mjtGeom.mjGEOM_BOX, pos=[*pos, PACK_BOX["wall_height"]], size=[*size, 0.0015],
                      contype=0, conaffinity=0, mass=0.001, rgba=OBJECT_BLACK)
 
-    # Black case (the lid), with the blue window strip of the real one on top.
-    half = PACK_CASE["half"]
+    # Black case: a lid open at the bottom (top plate and four walls), with the blue window strip of the real one on
+    # top. Its origin is at the centre of its outer box.
+    half, wall, top_plate = PACK_CASE["half"], PACK_CASE["wall"], PACK_CASE["top"]
     case = world.add_body(name="black_case", pos=[*place(PACK_CASE), top + half[2]], quat=_yaw_quat(PACK_CASE["yaw"]))
     case.add_freejoint()
-    case.add_geom(type=mujoco.mjtGeom.mjGEOM_BOX, size=half, mass=0.1, friction=[1.2, 0.01, 0.001],
-                  rgba=[0.06, 0.06, 0.08, 1])
+    wall_half_z = half[2] - top_plate / 2
+    for pos, size in (
+        ([0, 0, half[2] - top_plate / 2], [half[0], half[1], top_plate / 2]),
+        ([half[0] - wall / 2, 0, -top_plate / 2], [wall / 2, half[1], wall_half_z]),
+        ([-half[0] + wall / 2, 0, -top_plate / 2], [wall / 2, half[1], wall_half_z]),
+        ([0, half[1] - wall / 2, -top_plate / 2], [half[0] - wall, wall / 2, wall_half_z]),
+        ([0, -half[1] + wall / 2, -top_plate / 2], [half[0] - wall, wall / 2, wall_half_z]),
+    ):
+        case.add_geom(type=mujoco.mjtGeom.mjGEOM_BOX, pos=pos, size=size, mass=0.02, friction=[1.2, 0.01, 0.001],
+                      rgba=[0.06, 0.06, 0.08, 1])
     case.add_geom(type=mujoco.mjtGeom.mjGEOM_BOX, pos=[0, 0, half[2]], size=[half[0] * 0.45, half[1] * 0.85, 0.0006],
                   contype=0, conaffinity=0, mass=0.001, rgba=[0.25, 0.3, 0.55, 1])
 
@@ -428,8 +447,83 @@ def build_model(robot="g1", movable_base=False):
         light.diffuse = [SCENE_LIGHT] * 3
         light.specular = [0.1, 0.1, 0.1]
 
+    # Sticky grasp (see StickyGrasp): one weld per hand and graspable object, switched on while the hand holds it.
+    for side in GRIPPER_SIDES:
+        for name in GRASP_OBJECTS:
+            weld = spec.add_equality(name=f"{side}_holds_{name}", type=mujoco.mjtEq.mjEQ_WELD,
+                                     objtype=mujoco.mjtObj.mjOBJ_BODY)
+            weld.name1, weld.name2 = f"{side}_wrist_yaw_link", name
+            weld.active = False
+
     spec.option.timestep = 0.002
     return spec.compile(), body_joints
+
+
+class StickyGrasp:
+    """Holds an object rigidly in a gripper that closed on it, until the gripper opens.
+
+    The simulated finger pads hold objects by friction on a few contact points only: the case could pivot and slip
+    out where the real Dex1, with its rubber fingertips, holds it firmly. When a gripper is
+    commanded closed and its fingers are stopped by a graspable object between them, the object is welded to the
+    wrist in its current pose; when the gripper is commanded open again, it is released once the fingers have opened
+    clear of it (released while still squeezed, the opening fingers could spin it). The object must still be between
+    the fingers when they close, so a missed grasp stays missed.
+    """
+
+    def __init__(self, model):
+        self.model = model
+        self.welds = {(side, name): model.equality(f"{side}_holds_{name}").id
+                      for side in GRIPPER_SIDES for name in GRASP_OBJECTS}
+        self.wrist = {side: model.body(f"{side}_wrist_yaw_link").id for side in GRIPPER_SIDES}
+        self.objects = {name: model.body(name).id for name in GRASP_OBJECTS}
+        self.finger_qpos_adr = {side: [model.joint(f"{side}_finger_{f}_joint").qposadr[0] for f in "ab"]
+                                for side in GRIPPER_SIDES}
+        self.finger_dof_adr = {side: [model.joint(f"{side}_finger_{f}_joint").dofadr[0] for f in "ab"]
+                               for side in GRIPPER_SIDES}
+        self.held = dict.fromkeys(GRIPPER_SIDES)
+        self.grasp_opening = dict.fromkeys(GRIPPER_SIDES, 0.0)  # finger opening when the object was grasped
+
+    def _opening(self, data, side):
+        return np.mean(data.qpos[self.finger_qpos_adr[side]]) * GRIPPER_Q_MAX / FINGER_TRAVEL
+
+    def update(self, data, gripper_q_cmd):
+        """Call before each physics step with the commanded gripper openings (Dex1 units) by side."""
+        for side in GRIPPER_SIDES:
+            closing = gripper_q_cmd[side] < GRASP_CLOSED_BELOW
+            held = self.held[side]
+            if held is not None and not closing:
+                if self._opening(data, side) > self.grasp_opening[side] + GRASP_RELEASE_CLEARANCE:
+                    data.eq_active[self.welds[side, held]] = 0
+                    self.held[side] = None
+            elif held is None and closing:
+                opening = self._opening(data, side)
+                speed = abs(np.mean(data.qvel[self.finger_dof_adr[side]]))
+                # Fingers stopped short of the commanded opening, i.e. by something between them.
+                if opening > gripper_q_cmd[side] + 0.05 and speed < 0.002:
+                    for name in GRASP_OBJECTS:
+                        if self._between_fingers(data, side, name):
+                            self._attach(data, side, name)
+                            break
+
+    def _between_fingers(self, data, side, name):
+        wrist, body = self.wrist[side], self.objects[name]
+        local = data.xmat[wrist].reshape(3, 3).T @ (data.xpos[body] - data.xpos[wrist])
+        return (abs(local[0] - FINGER_X) < FINGER_HALF_LENGTH + 0.04 and abs(local[1]) < 0.02
+                and abs(local[2]) < 0.05)
+
+    def _attach(self, data, side, name):
+        """Weld the object to the wrist in its current pose: the object's origin fixed in the wrist frame (MuJoCo's
+        weld relpos) and the relative orientation q_wrist^-1 * q_object."""
+        wrist, body = self.wrist[side], self.objects[name]
+        eq = self.welds[side, name]
+        rel_pos = data.xmat[wrist].reshape(3, 3).T @ (data.xpos[body] - data.xpos[wrist])
+        inv_wrist, rel_quat = np.zeros(4), np.zeros(4)
+        mujoco.mju_negQuat(inv_wrist, data.xquat[wrist])
+        mujoco.mju_mulQuat(rel_quat, inv_wrist, data.xquat[body])
+        self.model.eq_data[eq, :11] = [0, 0, 0, *rel_pos, *rel_quat, 1]
+        data.eq_active[eq] = 1
+        self.held[side] = name
+        self.grasp_opening[side] = self._opening(data, side)
 
 
 class SimG1:
@@ -451,6 +545,7 @@ class SimG1:
             side: [model.joint(f"{side}_finger_{f}_joint").dofadr[0] for f in "ab"] for side in GRIPPER_SIDES
         }
         self.finger_actuators = {side: [model.actuator(f"{side}_finger_{f}").id for f in "ab"] for side in GRIPPER_SIDES}
+        self.sticky = StickyGrasp(model)
         # G1-D following the Cyber Twin: base, wheel, column and torso joints set kinematically each step.
         follow = [n for n in (*G1D_BASE_JOINTS, *G1D_FIXED_JOINTS) if mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, n) >= 0]
         self.follow_names = follow
@@ -520,14 +615,25 @@ class SimG1:
             self.follow_target[:] = [values.get(n, 0.0) for n in self.follow_names]
 
     def objects_status(self):
-        """Where the black camera is, and whether it lies inside the box (for the status line)."""
+        """Where the black camera is, whether it lies inside the box and whether the case covers the box (for the
+        status line)."""
         m, d = self.model, self.data
         cam = d.xpos[m.body("black_camera").id]
         box = d.xpos[m.body("box").id]
         rot = d.xmat[m.body("box").id].reshape(3, 3)
         local = rot.T @ (cam - box)
         inside = all(abs(local[:2]) < PACK_BOX["inner_half"]) and local[2] < PACK_BOX["wall_height"] + 0.03
-        return f"camera at ({cam[0]:.2f}, {cam[1]:.2f}, {cam[2]:.2f}){' IN THE BOX' if inside else ''}"
+        # The case covers the box when it has gone down over it: its walls around the box's (centred within the
+        # clearance between them, in line within 10 degrees) and its bottom below the box's rim.
+        case = m.body("black_case").id
+        case_local = rot.T @ (d.xpos[case] - box)
+        case_axis = rot.T @ d.xmat[case].reshape(3, 3)[:, 1]
+        clearance = np.array(PACK_CASE["half"][:2]) - PACK_CASE["wall"] - np.array(PACK_BOX["inner_half"]) - PACK_BOX["wall"]
+        covered = (all(abs(case_local[:2]) < clearance) and case_local[2] - PACK_CASE["half"][2] < PACK_BOX["wall_height"]
+                   and abs(case_axis[1]) > np.cos(np.deg2rad(10)) and not self.sticky.held["left"])
+        return (f"camera at ({cam[0]:.2f}, {cam[1]:.2f}, {cam[2]:.2f}){' IN THE BOX' if inside else ''}"
+                f" | case at ({d.xpos[case][0]:.2f}, {d.xpos[case][1]:.2f}, {d.xpos[case][2]:.2f})"
+                f"{' BOX COVERED' if covered else ''}")
 
     def base_pose(self):
         """x, y, yaw of the base and column height (0 if this robot does not follow the twin)."""
@@ -556,6 +662,7 @@ class SimG1:
 
         for side in GRIPPER_SIDES:
             data.ctrl[self.finger_actuators[side]] = gripper_q_cmd[side] / GRIPPER_Q_MAX * FINGER_TRAVEL
+        self.sticky.update(data, gripper_q_cmd)
 
         mujoco.mj_step(self.model, data)
 
