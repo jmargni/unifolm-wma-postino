@@ -85,16 +85,19 @@ class ReplayPolicy:
 
     def _next_chunk(self, current: np.ndarray):
         last = len(self.actions) - 1
+        start = self.states[0]
+        # Hold the recorded start pose itself: sending back the measured pose would let the arms sag a little
+        # more at every request.
+        hold = np.repeat(start[None], ACTION_CHUNK, axis=0)
         if self.finished:
-            return np.repeat(current[None], ACTION_CHUNK, axis=0), "episode done: holding the start pose"
+            return hold, "episode done: holding the start pose"
         if self.returning:
             # Back to the start pose at a limited speed, then hold there or (--loop) play again.
-            start = self.states[0]
             if np.abs(current[:14] - start[:14]).max() <= AT_START:
                 self.returning, self.index = False, 0
                 if not self.loop:
                     self.finished = True
-                    return np.repeat(current[None], ACTION_CHUNK, axis=0), "episode done: holding the start pose"
+                    return hold, "episode done: holding the start pose"
             else:
                 max_step = RETURN_SPEED / self.control_freq
                 actions = np.empty((ACTION_CHUNK, current.shape[0]), dtype=np.float32)

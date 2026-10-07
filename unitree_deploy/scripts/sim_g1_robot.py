@@ -86,6 +86,10 @@ GRIPPER_YELLOW = [0.95, 0.75, 0.1, 1]
 FINGER_TIP_RED = [0.85, 0.1, 0.08, 1]
 GRIPPER_Q_MAX = 5.45
 FINGER_TRAVEL = 0.04
+# Finger position servo (N/m, N s/m). The client's Dex1 controller never commands more than 0.18 units (1.3 mm) past
+# the measured opening, so a held object is squeezed by kp x 1.3 mm per finger: stiff enough to carry the camera.
+FINGER_KP, FINGER_KV = 3000, 25
+WRIST_GRIPPER_MASS, FINGER_MASS = 0.781, 0.051  # kg; a finger = pad + red tip
 
 # Head stereo camera (torso frame), calibrated from the G1_Dex1_MountCameraRedGripper dataset: the red finger tips
 # in 33 real frames of each view against the simulated arms at the recorded joint angles (median error 8 px).
@@ -135,12 +139,22 @@ def _add_gripper(spec, side):
         if geom.meshname.endswith("rubber_hand"):
             spec.delete(geom)
 
+    # Mass of the wrist link and the gripper as in the model robot_client.py uses for its gravity torques
+    # (g1_body29_hand14.urdf: 0.78 kg past the wrist yaw joint, centre of mass 9.9 cm out), fingers included.
+    # With the light rubber-hand link, those torques lifted the hand ~6 mm above the recorded grasp height and the
+    # fingers caught only the top edge of the camera, which then slipped out.
+    sign_y = 1 if side == "right" else -1
+    wrist.explicitinertial = True
+    wrist.mass = WRIST_GRIPPER_MASS - 2 * FINGER_MASS
+    wrist.ipos = [0.0952, sign_y * 0.0051, 0]
+    wrist.inertia = [0.0008, 0.0022, 0.0022]
+    wrist.iquat = [1, 0, 0, 0]
+    wrist.fullinertia = [np.nan] * 6  # unset (the G1-D URDF gives a full inertia matrix)
     wrist.add_geom(
         name=f"{side}_gripper_palm",
         type=mujoco.mjtGeom.mjGEOM_BOX,
         pos=[0.075, 0, 0],
         size=[0.02, 0.04, 0.022],
-        mass=0.3,
         rgba=GRIPPER_YELLOW,
     )
     for finger, sign in (("a", 1), ("b", -1)):
@@ -155,7 +169,7 @@ def _add_gripper(spec, side):
         body.add_geom(
             type=mujoco.mjtGeom.mjGEOM_BOX,
             size=[FINGER_HALF_LENGTH, 0.005, 0.018],
-            mass=0.05,
+            mass=FINGER_MASS - 0.001,
             friction=[1.5, 0.01, 0.001],
             condim=4,
             rgba=[0.12, 0.12, 0.12, 1],
@@ -172,7 +186,7 @@ def _add_gripper(spec, side):
             forcerange=[-20, 20],
             forcelimited=mujoco.mjtLimited.mjLIMITED_TRUE,
         )
-        actuator.set_to_position(kp=500, kv=10)
+        actuator.set_to_position(kp=FINGER_KP, kv=FINGER_KV)
 
     # Above the palm, looking past the fingers.
     wrist.add_camera(name=f"{side}_wrist", pos=[0.04, 0, 0.045], quat=_camera_quat(15), fovy=90)
