@@ -324,8 +324,22 @@ and the web page are brighter.
 | --- | --- |
 | `PEP start pose: DENY G1D-107 ... arm richiesto` | normal: arm the robot on :3000 |
 | `PEP start pose: UNREACHABLE ...` | the twin is not running, or `--pep_url` is wrong |
-| `[G1_29_ArmController] Waiting to subscribe dds...` | the simulator is not running |
+| `[G1_29_ArmController] Waiting to subscribe dds...` | once at start-up: normal. Repeated: the simulator is not running, or the two use different network interfaces for DDS (see below) |
 | `An error occurred: ... Connection refused` (repeated) | no model on port 8000: start the mock or the tunnel |
+
+**`Waiting to subscribe dds...` forever on a server.** The simulator and the
+client find each other over DDS on one network interface. With no option,
+each picks one automatically; on a server with a VPN, Docker or several
+network cards they can end up on different ones, or the simulator was started
+with `--network_interface` and the client was not, and the client never hears
+from the simulator. Run both on the same interface, `lo` when they are on the
+same machine (CycloneDDS then prints that `lo` is not multicast-capable:
+harmless):
+
+```bash
+python sim_g1_robot.py --robot g1d --network_interface lo ...
+UNITREE_IMAGE_SERVER=127.0.0.1 python robot_client.py --control_freq 15 --network_interface lo ...
+```
 
 ## 1. Start everything
 
