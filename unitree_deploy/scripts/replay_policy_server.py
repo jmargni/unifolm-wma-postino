@@ -26,8 +26,9 @@ PEP checks.
 - With --full it plays the whole recording unchanged (in the simulator the case
   ends next to the box).
 - At the end it brings the arms back to the start pose at a gentle speed and
-  holds them there; with --loop it then plays again (in the simulator, restart
-  it to put the camera back on the table).
+  holds them there. With --loop it waits there (--loop_pause, 8 s by default)
+  and plays again: for a demo that repeats, start the simulator with
+  --auto_reset, which puts the objects back while the arms wait.
 
 The simulator's scene (sim_g1_robot.py) places the camera and the box where the
 recorded grippers close and open, so the replay picks up the camera and drops
@@ -38,6 +39,7 @@ import argparse
 import json
 import re
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -59,7 +61,8 @@ def normalize(text: str) -> str:
 
 
 class ReplayPolicy:
-    def __init__(self, episode: Path, stride: int, loop: bool, accept: list[str], full: bool = False):
+    def __init__(self, episode: Path, stride: int, loop: bool, accept: list[str], full: bool = False,
+                 loop_pause: float = 8.0):
         data = np.load(episode)
         end = None if full else int(PACKING_END * int(data["fps"]))
         # The model's actions are 2 recorded frames apart (frame_stride 2 at 30 fps = 15 Hz, the client's
@@ -70,6 +73,8 @@ class ReplayPolicy:
         self.accepted = {normalize(self.instruction), *(normalize(a) for a in accept)}
         self.control_freq = int(data["fps"]) / stride
         self.loop = loop
+        self.loop_pause = loop_pause
+        self.restart_at = None  # with --loop: when to play again, once back at the start pose
         self.index = 0  # episode step closest to the robot's pose at the last request
         self.returning = False
         self.finished = False  # back at the start pose after the episode (without --loop: hold there)
@@ -99,13 +104,21 @@ class ReplayPolicy:
         hold = np.repeat(start[None], ACTION_CHUNK, axis=0)
         if self.finished:
             return hold, "episode done: holding the start pose"
-        if self.returning:
-            # Back to the start pose at a limited speed, then hold there or (--loop) play again.
+        if self.restart_at is not None:
+            # --loop: hold the start pose for the pause (the simulator's --auto_reset puts the objects back), then
+            # play again from the start.
+            if time.monotonic() < self.restart_at:
+                return hold, f"episode done: playing again in {self.restart_at - time.monotonic():.0f} s"
+            self.restart_at, self.index = None, 0
+        elif self.returning:
+            # Back to the start pose at a limited speed, then hold there or (--loop) play again after a pause.
             if np.abs(current[:14] - start[:14]).max() <= AT_START:
                 self.returning, self.index = False, 0
                 if not self.loop:
                     self.finished = True
                     return hold, "episode done: holding the start pose"
+                self.restart_at = time.monotonic() + self.loop_pause
+                return hold, f"episode done: playing again in {self.loop_pause:.0f} s"
             else:
                 max_step = RETURN_SPEED / self.control_freq
                 actions = np.empty((ACTION_CHUNK, current.shape[0]), dtype=np.float32)
@@ -167,7 +180,11 @@ def main():
     parser.add_argument("--episode", type=Path, default=DEFAULT_EPISODE, help="Recorded episode (.npz).")
     parser.add_argument("--stride", type=int, default=2,
                         help="Recorded frames per action: 2 plays the 30 fps recording at the client's 15 Hz.")
-    parser.add_argument("--loop", action="store_true", help="Play the episode again after returning to the start.")
+    parser.add_argument("--loop", action="store_true",
+                        help="Play the episode again after returning to the start pose and waiting --loop_pause s "
+                        "(start the simulator with --auto_reset to put the objects back meanwhile).")
+    parser.add_argument("--loop_pause", type=float, default=8.0,
+                        help="With --loop: seconds to hold the start pose before playing again.")
     parser.add_argument("--full", action="store_true",
                         help="Play the whole recording unchanged (camera packing, then the left hand moving the black "
                         "case; in the simulator the case ends next to the box).")
@@ -180,7 +197,7 @@ def main():
 
     if args.cover:
         args.episode, args.full = COVER_EPISODE, True
-    policy = ReplayPolicy(args.episode, args.stride, args.loop, args.accept, args.full)
+    policy = ReplayPolicy(args.episode, args.stride, args.loop, args.accept, args.full, args.loop_pause)
     server = ThreadingHTTPServer((args.host, args.port), make_handler(policy))
     print(f">>> Replay policy server is ready on http://{args.host}:{args.port} ...", flush=True)
     print(f">>> Episode: {len(policy.actions)} actions at {policy.control_freq:g} Hz "

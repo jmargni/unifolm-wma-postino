@@ -131,7 +131,25 @@ UNITREE_IMAGE_SERVER=127.0.0.1 python robot_client.py --control_freq 15
 The robot starts immediately (nothing to arm) and nothing is checked. After
 about 2 minutes the simulator prints `IN THE BOX`; with `--cover`, after about
 2.5 minutes also `BOX COVERED`. To run it again, restart the simulator and the
-replay server.
+replay server, or let it repeat by itself:
+
+**Repeating demo (start over by itself).** Start the simulator with
+`--auto_reset` and the replay server with `--loop`; the client runs on
+unchanged:
+
+```bash
+python sim_g1_robot.py --robot g1d --auto_reset --web_port 8080
+python replay_policy_server.py --cover --loop
+UNITREE_IMAGE_SERVER=127.0.0.1 python robot_client.py --control_freq 15
+```
+
+After each packing the arms go back to the start pose; once they have held it
+for 3 s, the simulator puts the camera and the lid back where they started
+(`>>> Scene reset #N` in its terminal), and after an 8 s pause
+(`--loop_pause`) the replay plays again. One cycle takes about 2.5 minutes.
+The web view also has a **reset scene** button, to put the objects back by
+hand at any time (useful between runs without `--auto_reset`, e.g. with the
+real model).
 
 ### C. G1-D simulator + real model on EC2 + Cyber Twin PEP
 
@@ -245,8 +263,9 @@ python view_camera_stream.py      # Esc to close
 
 `--web_port` adds a web page with a live view of the simulation, from a
 camera you can move (drag to orbit, scroll to zoom, or the front / top / side
-/ table close-up buttons), and the status line (green once `IN THE BOX` /
-`BOX COVERED`). It works without a screen, so the simulator can run on a
+/ table close-up buttons), the status line (green once `IN THE BOX` /
+`BOX COVERED`) and a **reset scene** button that puts the camera and the lid
+back where they started. It works without a screen, so the simulator can run on a
 server:
 
 ```bash

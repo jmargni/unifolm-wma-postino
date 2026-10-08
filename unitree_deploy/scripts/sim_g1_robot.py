@@ -98,6 +98,10 @@ FINGER_FRICTION, FINGER_CONDIM = [1.5, 0.01, 0.001], 4
 # hand and so drops flat into the box (held rigidly, it hung tilted with the wrist and landed on its side).
 GRASP_OBJECTS = ("black_case",)
 GRASP_CLOSED_BELOW = 4.0
+# Loose objects put back by reset_objects (start over), and with --auto_reset: how long the arms must hold the start
+# pose after the objects were moved before they are put back.
+RESET_OBJECTS = ("black_camera", "black_case")
+AUTO_RESET_AFTER = 3.0
 GRASP_RELEASE_CLEARANCE = 0.3  # Dex1 units the fingers open beyond the grasp before the object is let go
 
 # Head stereo camera (torso frame), calibrated from the G1_Dex1_MountCameraRedGripper dataset: the red finger tips
@@ -484,6 +488,12 @@ class StickyGrasp:
         self.held = dict.fromkeys(GRIPPER_SIDES)
         self.grasp_opening = dict.fromkeys(GRIPPER_SIDES, 0.0)  # finger opening when the object was grasped
 
+    def release_all(self, data):
+        for side, held in self.held.items():
+            if held is not None:
+                data.eq_active[self.welds[side, held]] = 0
+                self.held[side] = None
+
     def _opening(self, data, side):
         return np.mean(data.qpos[self.finger_qpos_adr[side]]) * GRIPPER_Q_MAX / FINGER_TRAVEL
 
@@ -561,6 +571,13 @@ class SimG1:
         for side in GRIPPER_SIDES:
             self.data.qpos[self.finger_qpos_adr[side]] = FINGER_TRAVEL
         mujoco.mj_forward(model, self.data)
+        # Where the loose objects start (free joint: position and orientation), to put them back (reset_objects).
+        self.arm_qpos_adr = np.array(arm_qpos)
+        self.objects_start = {}
+        for name in RESET_OBJECTS:
+            joint = model.body(name).jntadr[0]
+            adr, dof = model.jnt_qposadr[joint], model.jnt_dofadr[joint]
+            self.objects_start[name] = (adr, dof, self.data.qpos[adr : adr + 7].copy())
 
         # Latest commands, written by the DDS callbacks and read by the physics loop.
         self.lock = threading.Lock()
@@ -614,6 +631,23 @@ class SimG1:
         values = {"base_x": robot["x"], "base_y": robot["y"], "base_yaw": robot["yaw"], **robot["joints"]}
         with self.lock:
             self.follow_target[:] = [values.get(n, 0.0) for n in self.follow_names]
+
+    def objects_moved(self) -> bool:
+        """Whether any loose object is more than 1 cm from where it started."""
+        return any(np.linalg.norm(self.data.qpos[adr : adr + 3] - start[:3]) > 0.01
+                   for adr, _, start in self.objects_start.values())
+
+    def arms_at_start(self, tolerance: float = 0.08) -> bool:
+        """Whether both arms are at the task's start pose (within `tolerance` rad per joint)."""
+        return np.abs(self.data.qpos[self.arm_qpos_adr] - START_ARM_POSE).max() < tolerance
+
+    def reset_objects(self):
+        """Put the camera and the case back where they started, at rest, and release any grasp (start over)."""
+        for adr, dof, start in self.objects_start.values():
+            self.data.qpos[adr : adr + 7] = start
+            self.data.qvel[dof : dof + 6] = 0
+        self.sticky.release_all(self.data)
+        mujoco.mj_forward(self.model, self.data)
 
     def objects_status(self):
         """Where the black camera is, whether it lies inside the box and whether the case covers the box (for the
@@ -764,6 +798,7 @@ WEB_PAGE = """<!doctype html>
   <button data-view="zoom=0.85">zoom in</button><button data-view="zoom=1.18">zoom out</button>
   <button data-view="preset=front">front</button><button data-view="preset=top">top</button>
   <button data-view="preset=side">side</button><button data-view="preset=table">table close-up</button>
+  <button id="reset" title="Put the camera and the case back where they started">reset scene</button>
   <span class="hint">or drag the image to orbit, scroll to zoom</span>
 </div>
 <div id="status">waiting for the simulator...</div>
@@ -771,6 +806,7 @@ WEB_PAGE = """<!doctype html>
 <script>
 const send = q => fetch("view?" + q).catch(() => {});
 document.querySelectorAll("[data-view]").forEach(b => b.onclick = () => send(b.dataset.view));
+document.getElementById("reset").onclick = () => fetch("reset").catch(() => {});
 const img = document.getElementById("view");
 let drag = null;
 img.addEventListener("pointerdown", e => { drag = [e.clientX, e.clientY]; img.setPointerCapture(e.pointerId); });
@@ -821,8 +857,8 @@ WEB_VIEW_SIZE = (960, 720)  # width, height of the web view (4:3, as the page sh
 WEB_VIEWS = {"front": (180, -25, 1.6), "top": (180, -85, 1.1), "side": (110, -20, 1.4), "table": (180, -45, 0.6)}
 
 
-def web_server(shared_qpos, shared_status, host: str, port: int, fps: float, robot: str, movable_base: bool,
-               bright: bool = True):
+def web_server(shared_qpos, shared_status, shared_reset, host: str, port: int, fps: float, robot: str,
+               movable_base: bool, bright: bool = True):
     """Child process: a web page with a live view of the simulation from a camera the viewer can move (orbit, zoom,
     presets), and the status line. For remote servers without a screen: open it through an SSH tunnel."""
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -885,6 +921,12 @@ def web_server(shared_qpos, shared_status, host: str, port: int, fps: float, rob
                 with shared_status.get_lock():
                     text = shared_status.value.decode(errors="replace")
                 self._send(json.dumps({"status": text}).encode(), "application/json")
+            elif url.path == "/reset":
+                print(f">>> Web view: scene reset requested by {self.client_address[0]} "
+                      f"({self.headers.get('User-Agent', '?')[:60]})", flush=True)
+                with shared_reset.get_lock():
+                    shared_reset.value = 1  # the simulator puts the objects back at its next step
+                self._send(b"", "text/plain", 204)
             elif url.path == "/view":
                 query = {k: v[0] for k, v in parse_qs(url.query).items()}
                 try:
@@ -1003,6 +1045,10 @@ def main():
                         help="Address the web view listens on. The default accepts only local connections (and SSH "
                         "tunnels); 0.0.0.0 opens it to the network, with no password.")
     parser.add_argument("--web_fps", type=float, default=15, help="Frame rate of the web view.")
+    parser.add_argument("--auto_reset", action="store_true",
+                        help=f"Start over by itself: once the camera or the case has moved and the arms have held "
+                        f"the start pose for {AUTO_RESET_AFTER:g} s, put the objects back where they started. With "
+                        "replay_policy_server.py --loop, the packing then repeats.")
     parser.add_argument("--dark_view", action="store_true",
                         help="Keep the dark floor of the robot's cameras in the viewer window and the web view too "
                         "(by default they show a lighter floor and sky; the camera images sent to the model always "
@@ -1031,11 +1077,13 @@ def main():
 
     # Latest status line, read by the web view.
     shared_status = ctx.Array("c", 2048)
+    # Set to 1 by the web view's "reset scene" button; the physics loop then puts the objects back.
+    shared_reset = ctx.Value("i", 0)
     web_process = None
     if args.web_port:
         web_process = ctx.Process(
             target=web_server,
-            args=(shared_qpos, shared_status, args.web_host, args.web_port, args.web_fps, args.robot,
+            args=(shared_qpos, shared_status, shared_reset, args.web_host, args.web_port, args.web_fps, args.robot,
                   bool(args.twin_url), not args.dark_view),
             daemon=True,
         )
@@ -1064,6 +1112,7 @@ def main():
     sim_start = data.time
     next_share = time.monotonic()
     next_log = next_share + 2.0
+    next_reset_check, settled_since, num_resets = next_share, None, 0
     log_sim_time, log_wall_time = data.time, time.perf_counter()
     try:
         while viewer is None or viewer.is_running():
@@ -1080,6 +1129,26 @@ def main():
                 robot.publish_state()
 
             now = time.monotonic()
+            if now >= next_reset_check:
+                next_reset_check = now + 0.1
+                reset_reason = None
+                with shared_reset.get_lock():
+                    if shared_reset.value:
+                        shared_reset.value, reset_reason = 0, "requested from the web view"
+                if args.auto_reset and reset_reason is None:
+                    # Start over once the objects have moved and the arms have held the start pose for a while.
+                    if robot.objects_moved() and robot.arms_at_start():
+                        settled_since = settled_since or now
+                        if now - settled_since >= AUTO_RESET_AFTER:
+                            reset_reason = "arms back at the start pose (--auto_reset)"
+                    else:
+                        settled_since = None
+                if reset_reason:
+                    robot.reset_objects()
+                    settled_since = None
+                    num_resets += 1
+                    print(f">>> Scene reset #{num_resets}: camera and case back at their start ({reset_reason}).",
+                          flush=True)
             if now >= next_share:
                 next_share = now + 1 / 60
                 with shared_qpos.get_lock():
@@ -1101,7 +1170,8 @@ def main():
                     flush=True,
                 )
                 status = (f"{objects}\ngrippers (left, right; 0 closed, 5.4 open): {grippers} | "
-                          f"commands received: {num_lowcmd} arm, {num_gripper_cmd} gripper | real-time x{realtime:.2f}")
+                          f"commands received: {num_lowcmd} arm, {num_gripper_cmd} gripper | real-time x{realtime:.2f}"
+                          + (f" | scene resets: {num_resets}" if num_resets else ""))
                 with shared_status.get_lock():
                     shared_status.value = status.encode()[: len(shared_status) - 1]
     except KeyboardInterrupt:
