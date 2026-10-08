@@ -464,6 +464,23 @@ def build_model(robot="g1", movable_base=False):
     return spec.compile(), body_joints
 
 
+def pack_status(model, data, case_held: bool = False) -> tuple[bool, bool]:
+    """(camera in the box, box covered by the case) for the task "pack black camera into box"."""
+    box = data.xpos[model.body("box").id]
+    rot = data.xmat[model.body("box").id].reshape(3, 3)
+    local = rot.T @ (data.xpos[model.body("black_camera").id] - box)
+    inside = bool(all(abs(local[:2]) < PACK_BOX["inner_half"]) and local[2] < PACK_BOX["wall_height"] + 0.03)
+    # The case covers the box when it has gone down over it: its walls around the box's (centred within the
+    # clearance between them, in line within 10 degrees) and its bottom below the box's rim.
+    case = model.body("black_case").id
+    case_local = rot.T @ (data.xpos[case] - box)
+    case_axis = rot.T @ data.xmat[case].reshape(3, 3)[:, 1]
+    clearance = np.array(PACK_CASE["half"][:2]) - PACK_CASE["wall"] - np.array(PACK_BOX["inner_half"]) - PACK_BOX["wall"]
+    covered = bool(all(abs(case_local[:2]) < clearance) and case_local[2] - PACK_CASE["half"][2] < PACK_BOX["wall_height"]
+                   and abs(case_axis[1]) > np.cos(np.deg2rad(10)) and not case_held)
+    return inside, covered
+
+
 class StickyGrasp:
     """Holds an object rigidly in a gripper that closed on it, until the gripper opens.
 
@@ -653,21 +670,10 @@ class SimG1:
         """Where the black camera is, whether it lies inside the box and whether the case covers the box (for the
         status line)."""
         m, d = self.model, self.data
-        cam = d.xpos[m.body("black_camera").id]
-        box = d.xpos[m.body("box").id]
-        rot = d.xmat[m.body("box").id].reshape(3, 3)
-        local = rot.T @ (cam - box)
-        inside = all(abs(local[:2]) < PACK_BOX["inner_half"]) and local[2] < PACK_BOX["wall_height"] + 0.03
-        # The case covers the box when it has gone down over it: its walls around the box's (centred within the
-        # clearance between them, in line within 10 degrees) and its bottom below the box's rim.
-        case = m.body("black_case").id
-        case_local = rot.T @ (d.xpos[case] - box)
-        case_axis = rot.T @ d.xmat[case].reshape(3, 3)[:, 1]
-        clearance = np.array(PACK_CASE["half"][:2]) - PACK_CASE["wall"] - np.array(PACK_BOX["inner_half"]) - PACK_BOX["wall"]
-        covered = (all(abs(case_local[:2]) < clearance) and case_local[2] - PACK_CASE["half"][2] < PACK_BOX["wall_height"]
-                   and abs(case_axis[1]) > np.cos(np.deg2rad(10)) and not self.sticky.held["left"])
+        inside, covered = pack_status(m, d, case_held=self.sticky.held["left"] is not None)
+        cam, case = d.xpos[m.body("black_camera").id], d.xpos[m.body("black_case").id]
         return (f"camera at ({cam[0]:.2f}, {cam[1]:.2f}, {cam[2]:.2f}){' IN THE BOX' if inside else ''}"
-                f" | case at ({d.xpos[case][0]:.2f}, {d.xpos[case][1]:.2f}, {d.xpos[case][2]:.2f})"
+                f" | case at ({case[0]:.2f}, {case[1]:.2f}, {case[2]:.2f})"
                 f"{' BOX COVERED' if covered else ''}")
 
     def base_pose(self):
