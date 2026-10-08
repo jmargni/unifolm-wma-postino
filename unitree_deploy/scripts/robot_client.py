@@ -11,6 +11,8 @@ from typing import Any, Deque, MutableMapping, OrderedDict
 from collections import deque
 from pathlib import Path
 
+from unitree_sdk2py.core.channel import ChannelFactoryInitialize
+
 from unitree_deploy.pep_bridge import TwinPEP
 from unitree_deploy.real_unitree_env import make_real_env
 from unitree_deploy.utils.eval_utils import (
@@ -171,6 +173,10 @@ def run_eval(args: argparse.Namespace) -> None:
             maxlen=16),  # NOTE: HAND CODE AS THE MODEL PREDCIT FUTURE 16 STEPS
     }
 
+    if args.network_interface:
+        # The first initialisation of the DDS factory wins (the arm controller's later ChannelFactoryInitialize(0)
+        # then keeps it), so this pins the interface the client uses to talk to the robot or the simulator.
+        ChannelFactoryInitialize(0, args.network_interface)
     env = make_real_env(
         robot_type=args.robot_type,
         dt=1 / args.control_freq,
@@ -242,6 +248,13 @@ def get_parser() -> argparse.ArgumentParser:
                         type=float,
                         default=30,
                         help="The Low-level control frequency in Hz.")
+    parser.add_argument("--network_interface",
+                        type=str,
+                        default=None,
+                        help="Network interface for DDS (e.g. lo, eth0). Default: chosen automatically. Give the "
+                        "simulator the same --network_interface: if the two end up on different interfaces, the "
+                        "client waits forever at 'Waiting to subscribe dds...'. Both on lo when they run on the "
+                        "same machine.")
     parser.add_argument("--pep_url",
                         type=str,
                         default=None,
