@@ -261,6 +261,44 @@ Then open http://localhost:8080. By default the page only accepts local
 connections (and SSH tunnels); `--web_host 0.0.0.0` opens it to the network,
 without a password. `--web_fps` sets its frame rate (default 15).
 
+### Colours: what people see and what the model sees
+
+The simulator renders two kinds of images:
+
+| Images | Who looks at them | Colours |
+| --- | --- | --- |
+| Robot cameras (head and wrists, stream on port 5555) | the model (it receives the right head image), `view_camera_stream.py` | Always the **real colours** of the dataset the model was trained on: dark grey floor, dim lights. No option changes them. |
+| MuJoCo window and web view | people (demo, debugging) | **Bright** by default: light blue-grey floor, light sky, brighter lights, so the robot and the table stand out. `--dark_view` shows them in the real colours instead. |
+
+Only colours and lights differ; the physics is the same.
+
+**Demo with the replay server** (the robot packs the camera and covers the
+box; the replay does not look at the images, so the bright view costs
+nothing):
+
+```bash
+python sim_g1_robot.py --robot g1d --web_port 8080          # bright window + web view
+python replay_policy_server.py --cover
+UNITREE_IMAGE_SERVER=127.0.0.1 python robot_client.py --control_freq 15
+```
+
+**With the real model** (setup C: SSH tunnel to the model on EC2 instead of
+the replay server). The model always gets the real colours, whatever you
+choose for the window. Add `--dark_view` to watch the scene in the same
+colours the model sees, which helps to judge what it reacts to; to see its
+exact input image, also run `python view_camera_stream.py`:
+
+```bash
+python sim_g1_robot.py --robot g1d --web_port 8080 --dark_view   # real colours everywhere
+ssh -i ~/.ssh/id_ed25519 -N -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
+    -o ExitOnForwardFailure=yes -L 8000:127.0.0.1:8000 ubuntu@EC2_IP
+UNITREE_IMAGE_SERVER=127.0.0.1 python robot_client.py --control_freq 15 \
+    --language_instruction "pack black camera into box"
+```
+
+Without `--dark_view` the model still sees the real colours; only the window
+and the web page are brighter.
+
 ### Common messages
 
 | Client prints | Meaning |
@@ -503,7 +541,9 @@ physics instead of copying the commanded positions:
   strip (left): a lid open at the bottom, wide enough to go down over the box
   (3.5 mm clearance per side). Sizes measured in the dataset images (the box
   inside 4.1 x 8.9 cm, the lid 5.8 x 10.6 x 4 cm, a little larger than
-  measured so the lid fits over the box); dark grey floor. The objects are
+  measured so the lid fits over the box); dark grey floor in the robot's
+  cameras, as in the dataset (the window and web view show a lighter one, see
+  *Colours: what people see and what the model sees*). The objects are
   placed where the grippers of the recorded episode used by
   `replay_policy_server.py` close and open, so the replay packs the camera.
   The table is at the height the recorded hands reach. Both arms start at the

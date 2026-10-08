@@ -791,12 +791,38 @@ setInterval(() => fetch("status").then(r => r.json()).then(s => {
 </script></body></html>
 """
 
+# Bright view (brighten_view): floor, sky gradient and lights.
+VIEW_FLOOR_RGBA = [0.58, 0.63, 0.69, 1]
+VIEW_SKY_TOP, VIEW_SKY_BOTTOM = np.array([0.93, 0.95, 0.98]), np.array([0.78, 0.83, 0.89])
+VIEW_HEADLIGHT, VIEW_LIGHT = 0.35, 0.25
+
+
+def brighten_view(model):
+    """Lighter floor, sky and lights for the views people watch (viewer window, web view), to show the robot and
+    the table more clearly. Only colours and lights change, so physics is unaffected. The robot's cameras render
+    from their own model and keep the dark floor of the dataset images the model was trained on."""
+    floor_material = model.material("groundplane").id
+    model.mat_texid[floor_material] = -1  # plain colour instead of the dark floor texture
+    model.mat_rgba[floor_material] = VIEW_FLOOR_RGBA
+    for texture in range(model.ntex):
+        if model.tex_type[texture] == mujoco.mjtTexture.mjTEXTURE_SKYBOX:
+            start, height = model.tex_adr[texture], model.tex_height[texture]
+            width, channels = model.tex_width[texture], model.tex_nchannel[texture]
+            pixels = model.tex_data[start : start + width * height * channels].reshape(height, width, channels)
+            rows = np.linspace(0, 1, height)[:, None, None]  # light at the top, a little darker at the bottom
+            pixels[:, :, :3] = (255 * ((1 - rows) * VIEW_SKY_TOP + rows * VIEW_SKY_BOTTOM)).astype(np.uint8)
+    model.vis.rgba.haze[:] = [*VIEW_SKY_BOTTOM, 1]
+    model.vis.headlight.diffuse[:] = [VIEW_HEADLIGHT] * 3
+    model.light_diffuse[:] = VIEW_LIGHT
+
+
 WEB_VIEW_SIZE = (960, 720)  # width, height of the web view (4:3, as the page shows it)
 # Web view presets: (azimuth, elevation, distance) around the table, looking at the box.
 WEB_VIEWS = {"front": (180, -25, 1.6), "top": (180, -85, 1.1), "side": (110, -20, 1.4), "table": (180, -45, 0.6)}
 
 
-def web_server(shared_qpos, shared_status, host: str, port: int, fps: float, robot: str, movable_base: bool):
+def web_server(shared_qpos, shared_status, host: str, port: int, fps: float, robot: str, movable_base: bool,
+               bright: bool = True):
     """Child process: a web page with a live view of the simulation from a camera the viewer can move (orbit, zoom,
     presets), and the status line. For remote servers without a screen: open it through an SSH tunnel."""
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -805,6 +831,8 @@ def web_server(shared_qpos, shared_status, host: str, port: int, fps: float, rob
     model, _ = build_model(robot, movable_base)
     # This process's own model: its offscreen framebuffer is enlarged for the web view only.
     model.vis.global_.offwidth, model.vis.global_.offheight = WEB_VIEW_SIZE
+    if bright:
+        brighten_view(model)
     data = mujoco.MjData(model)
     mujoco.mj_forward(model, data)
     target = data.xpos[model.body("box").id] + [0, 0, 0.05]  # the box on the table
@@ -975,6 +1003,10 @@ def main():
                         help="Address the web view listens on. The default accepts only local connections (and SSH "
                         "tunnels); 0.0.0.0 opens it to the network, with no password.")
     parser.add_argument("--web_fps", type=float, default=15, help="Frame rate of the web view.")
+    parser.add_argument("--dark_view", action="store_true",
+                        help="Keep the dark floor of the robot's cameras in the viewer window and the web view too "
+                        "(by default they show a lighter floor and sky; the camera images sent to the model always "
+                        "keep the dark floor of the dataset).")
     args = parser.parse_args()
     if args.twin_url and args.robot != "g1d":
         parser.error("--twin_url needs --robot g1d")
@@ -1004,13 +1036,16 @@ def main():
         web_process = ctx.Process(
             target=web_server,
             args=(shared_qpos, shared_status, args.web_host, args.web_port, args.web_fps, args.robot,
-                  bool(args.twin_url)),
+                  bool(args.twin_url), not args.dark_view),
             daemon=True,
         )
         web_process.start()
 
     viewer = None
     if not args.headless:
+        if not args.dark_view:
+            # Colours and lights only: the camera process has its own model, physics is unaffected.
+            brighten_view(model)
         # The viewer gets its own copy of the data: it cannot read the physics data while a step writes it.
         # As a consequence, objects cannot be dragged with the mouse.
         view_data = mujoco.MjData(model)
