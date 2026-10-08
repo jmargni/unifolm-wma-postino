@@ -736,9 +736,89 @@ class SimG1:
             return self.num_lowcmd, self.num_gripper_cmd
 
 
-def camera_server(shared_qpos, port: int, fps: float, jpeg_quality: int, robot: str, movable_base: bool):
+RANDOMIZED_BODIES = ("box", "black_case", "black_camera")
+RNG_RANGES = dict(
+    light_scale=(0.75, 1.3),
+    light_pos_jitter=0.08,  # m, per axis
+    headlight_scale=(0.8, 1.25),
+    object_rgb_jitter=0.05,
+    table_rgb_jitter=0.05,
+    floor_rgb_jitter=0.04,
+    cam_pos_jitter=0.004,  # m, per axis
+    cam_rot_jitter_deg=1.5,
+    cam_fovy_jitter_deg=1.0,
+)
+
+
+class SceneRandomizer:
+    """Randomizes what the camera sees (lighting, a few colours, the head camera's own pose) without touching
+    geometry or physics -- for record_sim_dataset.py, which needs many visually-varied episodes of the same
+    successful motion. Only ever applied to camera_server's own model copy (see --seed), never to the model
+    driving the physics."""
+
+    def __init__(self, model, camera="head_right"):
+        self.model = model
+        self.cam_id = model.camera(camera).id
+        self.base_cam_pos = model.cam_pos[self.cam_id].copy()
+        self.base_cam_quat = model.cam_quat[self.cam_id].copy()
+        self.base_fovy = float(model.cam_fovy[self.cam_id])
+
+        self.base_light_diffuse = model.light_diffuse.copy()
+        self.base_light_pos = model.light_pos.copy()
+        self.base_headlight_diffuse = np.array(model.vis.headlight.diffuse, dtype=np.float64).copy()
+
+        self.table_geom = model.geom("table_top").id
+        self.base_table_rgba = model.geom_rgba[self.table_geom].copy()
+        self.floor_mat = model.material("groundplane").id
+        self.base_floor_rgba = model.mat_rgba[self.floor_mat].copy()
+
+        self.body_geoms = {}
+        self.base_body_rgba = {}
+        for name in RANDOMIZED_BODIES:
+            body_id = model.body(name).id
+            geom_ids = [g for g in range(model.ngeom) if model.geom_bodyid[g] == body_id]
+            self.body_geoms[name] = geom_ids
+            self.base_body_rgba[name] = {g: model.geom_rgba[g].copy() for g in geom_ids}
+
+    def randomize(self, rng: np.random.Generator):
+        m, r = self.model, RNG_RANGES
+
+        m.light_diffuse[:] = self.base_light_diffuse * rng.uniform(
+            *r["light_scale"], size=self.base_light_diffuse.shape[:1] + (1,))
+        m.light_pos[:] = self.base_light_pos + rng.uniform(-r["light_pos_jitter"], r["light_pos_jitter"],
+                                                            self.base_light_pos.shape)
+        m.vis.headlight.diffuse[:] = np.clip(self.base_headlight_diffuse * rng.uniform(*r["headlight_scale"]), 0, 1)
+
+        m.geom_rgba[self.table_geom, :3] = np.clip(
+            self.base_table_rgba[:3] + rng.uniform(-r["table_rgb_jitter"], r["table_rgb_jitter"], 3), 0, 1)
+        m.mat_rgba[self.floor_mat, :3] = np.clip(
+            self.base_floor_rgba[:3] + rng.uniform(-r["floor_rgb_jitter"], r["floor_rgb_jitter"], 3), 0, 1)
+        for name, geom_ids in self.body_geoms.items():
+            shift = rng.uniform(-r["object_rgb_jitter"], r["object_rgb_jitter"], 3)
+            for g in geom_ids:
+                m.geom_rgba[g, :3] = np.clip(self.base_body_rgba[name][g][:3] + shift, 0, 1)
+
+        m.cam_pos[self.cam_id] = self.base_cam_pos + rng.uniform(-r["cam_pos_jitter"], r["cam_pos_jitter"], 3)
+        axis = rng.normal(size=3)
+        axis /= np.linalg.norm(axis)
+        angle = np.deg2rad(rng.normal(0, r["cam_rot_jitter_deg"]))
+        delta_quat = np.zeros(4)
+        mujoco.mju_axisAngle2Quat(delta_quat, axis, angle)
+        new_quat = np.zeros(4)
+        mujoco.mju_mulQuat(new_quat, self.base_cam_quat, delta_quat)
+        m.cam_quat[self.cam_id] = new_quat
+        m.cam_fovy[self.cam_id] = self.base_fovy + rng.normal(0, r["cam_fovy_jitter_deg"])
+
+
+def camera_server(shared_qpos, port: int, fps: float, jpeg_quality: int, robot: str, movable_base: bool,
+                   seed: int | None = None):
     """Child process: render the cameras from the latest joint positions and stream them like the robot does."""
     model, _ = build_model(robot, movable_base)
+    if seed is not None:
+        # Only this process's model: it is the only one that renders, so this is the only copy that needs to
+        # look different between runs (e.g. record_sim_dataset.py generating many visually-varied episodes of
+        # the same task). Physics is unaffected: the main process's own model copy is never touched.
+        SceneRandomizer(model).randomize(np.random.default_rng(seed))
     data = mujoco.MjData(model)
     renderer = mujoco.Renderer(model, CAMERA_HEIGHT, CAMERA_WIDTH)
     # Shadows and reflections make rendering about 5x slower on an integrated GPU.
@@ -1019,6 +1099,10 @@ def main():
     parser.add_argument("--image_port", type=int, default=5555, help="TCP port of the camera stream.")
     parser.add_argument("--camera_fps", type=float, default=30, help="Frame rate of the camera stream.")
     parser.add_argument("--jpeg_quality", type=int, default=80, help="JPEG quality of the camera stream (0-100).")
+    parser.add_argument("--seed", type=int, default=None,
+                        help="Randomize lighting, a few object/table colours and the head camera's pose for this "
+                        "run (camera stream only, physics unaffected). For record_sim_dataset.py: many visually "
+                        "distinct episodes of the same motion.")
     parser.add_argument(
         "--robot",
         choices=("g1", "g1d"),
@@ -1070,7 +1154,8 @@ def main():
     if not args.no_cameras:
         camera_process = ctx.Process(
             target=camera_server,
-            args=(shared_qpos, args.image_port, args.camera_fps, args.jpeg_quality, args.robot, bool(args.twin_url)),
+            args=(shared_qpos, args.image_port, args.camera_fps, args.jpeg_quality, args.robot, bool(args.twin_url),
+                 args.seed),
             daemon=True,
         )
         camera_process.start()

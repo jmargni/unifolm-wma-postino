@@ -14,6 +14,7 @@ camera images (section 9).
 | `mock_policy_server.py` | A fake model server on `http://127.0.0.1:8000`. | `scripts/evaluation/real_eval_server.py` (needs a GPU and the 16.7 GB checkpoint) |
 | `replay_policy_server.py` | A model server that replays a real recorded "pack black camera into box" episode, so the robot performs the task's movements (best for demos). | `scripts/evaluation/real_eval_server.py` |
 | `view_camera_stream.py` | Shows the simulator's camera stream in a window (Esc to close). | — |
+| `record_sim_dataset.py` | Generates a simulator-rendered training set (video + state + action, in `prepare_data/prepare_training_data.py`'s output format) for fine-tuning the model on sim-rendered frames: see *12. Building a simulator training set* below. | — |
 
 ```
                  joint state (DDS)                 observation (HTTP POST)
@@ -775,3 +776,80 @@ Requirements on the twin side: the `trajectory` command in `engine.py` and the
 `--robot_type g1_dex1` is supported: its 14 arm joints map by name to the
 G1-D's arms; the two Dex1 grippers map to the G1-D hands' open / closed state.
 The bridge code is in `unitree_deploy/unitree_deploy/pep_bridge.py`.
+
+## 12. Building a simulator training set
+
+The real model (`scripts/evaluation/real_eval_server.py`) performs poorly when
+driven by the simulator's cameras instead of real ones: the rendered images
+differ enough from the real dataset's that the model does not recognise them
+well. Closing that gap means fine-tuning on examples where the video is
+simulator-rendered, paired with the matching robot state and action, so
+`record_sim_dataset.py` generates such a training set directly from the
+simulator.
+
+There is only one proven motion to generate from: the real "pack black camera
+into box" episode (the same one `replay_policy_server.py --cover` plays). So
+instead of varying what the robot does, each generated episode varies what the
+camera sees: the lighting, a few object and table colours, and the head
+camera's pose, all jittered a little within realistic bounds (`sim_g1_robot.py`'s
+`SceneRandomizer`, `--seed`).
+
+Unlike a first attempt at this, `record_sim_dataset.py` does **not** replay the
+recorded actions directly against MuJoCo physics in its own process (no DDS, no
+ZMQ, no `sim_g1_robot.py` / `replay_policy_server.py` / `robot_client.py`
+processes). That is much faster, but reliably failed to grasp the camera or
+the case at all — both PD-tracking the recorded actions with the real deployed
+controller's own gains, and kinematically puppeting the recorded states. This
+is a delicate, contact-rich small-object grasp, and skipping the real deployed
+controller's closed-loop, continuously-compliant torque control turns out to
+matter. So instead it launches the real setup above as actual subprocesses for
+every episode and taps their live ZMQ camera stream and DDS state/commands —
+confirmed repeatedly to reproduce the task's real outcome ("IN THE BOX" and
+"BOX COVERED" in `sim_g1_robot.py`'s own status line) — at the cost of each
+episode taking about as long as the live demo does (roughly 1.5–2 minutes), so
+50 episodes is on the order of an hour or more: run it unattended.
+
+```bash
+python record_sim_dataset.py --episodes 50
+```
+
+Note it drives `--robot g1d`, not `g1`: in testing, `g1`'s replay reproducibly
+stalled partway through the cover episode (stuck re-matching the same point in
+the recorded trajectory), where `g1d` completed it reliably. Object and camera
+placement are relative to the torso, which differs slightly between the two,
+so this is not just a flag to flip back without re-validating.
+
+On a CPU-constrained machine (developed against a 2-core one), the camera
+subprocess, `robot_client.py` and the recorder all compete for the same cores,
+and the achieved frame rate can fall well below `sim_g1_robot.py`'s
+`--camera_fps=30` default — down to ~2 fps in testing. That is a real hardware
+limit, not a bug: `record_sim_dataset.py` measures the actual rate from the
+frames' own arrival times and writes the video at that rate, so duration and
+state/action timing stay honest either way; it just means a lower-powered
+machine's dataset will have visibly sparser motion per episode. `MUJOCO_GL`
+defaults to `osmesa` (`--mujoco-gl` to override) — `sim_g1_robot.py`'s own
+`egl` default falls back to a very slow (and sometimes blank) path without a
+working `/dev/dri` render node; a few consecutive sparse/failed attempts are
+usually that, not something to debug further.
+
+This writes `../../data/` (the repo's `data/` folder) in the same layout
+`prepare_data/prepare_training_data.py` produces, ready to train on:
+
+```
+data/
+├── videos/unitree_g1_pack_camera_sim/cam_right_high/{0..49}.mp4
+├── transitions/unitree_g1_pack_camera_sim/{0..49}.h5
+├── transitions/unitree_g1_pack_camera_sim/meta_data/stats.safetensors
+└── unitree_g1_pack_camera_sim.csv
+```
+
+Add `unitree_g1_pack_camera_sim: <weight>` to `configs/train/config.yaml`'s
+`dataset_and_weights` (with `data_dir` pointing at `data/`) to train on it
+alongside the real `unitree_g1_pack_camera` dataset. `--seed` makes the run
+reproducible; `--episodes`/`--start-index` let you generate more episodes
+later and append them to the same dataset. Needs the `unitree_deploy` conda
+environment (`mujoco`, `opencv-python`, `h5py`, `pandas`, `safetensors`,
+`torch` — all but `h5py` are already in `unitree_deploy/pyproject.toml`: `pip
+install h5py` if it's missing) and, optionally, `ffmpeg` on `PATH` for H.264
+video (falls back to OpenCV's `mp4v` otherwise, which some video loaders may
+not read as well).
