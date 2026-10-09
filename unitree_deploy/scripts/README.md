@@ -326,6 +326,7 @@ and the web page are brighter.
 | `PEP start pose: UNREACHABLE ...` | the twin is not running, or `--pep_url` is wrong |
 | `[G1_29_ArmController] Waiting to subscribe dds...` | the simulator is not running |
 | `An error occurred: ... Connection refused` (repeated) | no model on port 8000: start the mock or the tunnel |
+| Simulator: `ZMQError: Address already in use (addr='tcp://*:5555')` | another program uses port 5555: give the simulator a free port, `--image_port 5556`, and the client the same one, `UNITREE_IMAGE_PORT=5556` (next to `UNITREE_IMAGE_SERVER`) |
 
 ## 1. Start everything
 
