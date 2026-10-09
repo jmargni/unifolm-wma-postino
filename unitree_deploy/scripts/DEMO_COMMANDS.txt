@@ -51,6 +51,18 @@ Browser:
   Twin console (PEP)  http://10.32.55.9:3000   -> click "Arma robot" to start
 
 
+=== REPLAY SERVER ON ANOTHER MACHINE (no tunnel) ===
+
+On the replay server machine (port 8000 open there):
+  python replay_policy_server.py --cover --loop --host 0.0.0.0
+
+On the postino machine, add --server_url to step 4 (local or demo server), e.g.:
+  UNITREE_IMAGE_SERVER=127.0.0.1 python robot_client.py --control_freq 15 --server_url http://<replay-server-ip>:8000 --pep_url http://127.0.0.1:3000
+  (on the demo server also UNITREE_IMAGE_PORT=5560)
+
+Skip step 3 on the postino machine. Simulator, twin and postino stay together on one machine.
+
+
 === NOTES ===
 - One cycle: camera into the box ~2 min, lid on the box ~2.5 min; status shows IN THE BOX / BOX COVERED.
 - Objects go back by themselves (--auto_reset); or press "reset scene" in the web view.

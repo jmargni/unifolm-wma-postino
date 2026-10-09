@@ -43,6 +43,15 @@ cd ~/projects/unifolm-wma-postino/unitree_deploy/scripts
 The mock model, the replay server and the SSH tunnel to EC2 all use port 8000:
 run **only one** of them.
 
+The model or replay server can also run on another machine, without a
+tunnel: start it on all interfaces and point the client at it (port 8000 must
+be open on that machine):
+
+```bash
+python replay_policy_server.py --cover --loop --host 0.0.0.0     # on the server machine
+UNITREE_IMAGE_SERVER=127.0.0.1 python robot_client.py --control_freq 15 --server_url http://<server-ip>:8000
+```
+
 In any setup, add `--web_port 8080` to the `sim_g1_robot.py` command to also
 watch the simulation in a browser at http://localhost:8080 (movable view and
 status line; with `--headless` it works on a server without a screen, see
