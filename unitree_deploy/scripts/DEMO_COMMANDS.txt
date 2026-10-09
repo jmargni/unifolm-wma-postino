@@ -1,0 +1,58 @@
+DEMO COMMANDS - packing camera + lid, replay server, Cyber Twin PEP
+Simulator web view on port 8080 in both environments.
+Each command in its own terminal, started in this order.
+Without the PEP: leave out --twin_url (simulator) and --pep_url (client), and skip the twin.
+
+
+=== LOCAL (laptop) ===
+
+In every terminal:
+  conda activate unitree_deploy
+  cd ~/projects/unifolm-wma-postino/unitree_deploy/scripts
+
+1. Twin / PEP (ports 3000, 4000):
+  cd ~/projects/DGS-CyberTwin-G1D && python server.py
+
+2. Simulator (web view on 8080; add --headless to skip the MuJoCo window):
+  python sim_g1_robot.py --robot g1d --auto_reset --web_port 8080 --twin_url http://127.0.0.1:3000
+
+3. Replay server (full packing, repeats by itself):
+  python replay_policy_server.py --cover --loop
+
+4. Postino (client):
+  UNITREE_IMAGE_SERVER=127.0.0.1 python robot_client.py --control_freq 15 --pep_url http://127.0.0.1:3000
+
+Browser:
+  Robot (simulator)   http://localhost:8080
+  Twin console (PEP)  http://localhost:3000   -> click "Arma robot" to start
+
+
+=== DEMO SERVER (10.32.55.9) ===
+
+In every terminal:
+  conda activate unitree_deploy
+  cd ~/unitreelab/unifolm-world-model-action/unitree_deploy/scripts
+
+1. Twin / PEP: already running in Docker on ports 3000 and 4000
+   (it needs the updated engine.py/server.py with the "trajectory" command).
+   Its camera service holds ports 5555-5557, so the simulator uses 5560.
+
+2. Simulator (no screen: --headless; web view reachable from other machines):
+  python sim_g1_robot.py --robot g1d --headless --auto_reset --web_port 8080 --web_host 0.0.0.0 --image_port 5560 --twin_url http://127.0.0.1:3000
+
+3. Replay server:
+  python replay_policy_server.py --cover --loop
+
+4. Postino (client), same camera port as the simulator:
+  UNITREE_IMAGE_SERVER=127.0.0.1 UNITREE_IMAGE_PORT=5560 python robot_client.py --control_freq 15 --pep_url http://127.0.0.1:3000
+
+Browser:
+  Robot (simulator)   http://10.32.55.9:8080
+  Twin console (PEP)  http://10.32.55.9:3000   -> click "Arma robot" to start
+
+
+=== NOTES ===
+- One cycle: camera into the box ~2 min, lid on the box ~2.5 min; status shows IN THE BOX / BOX COVERED.
+- Objects go back by themselves (--auto_reset); or press "reset scene" in the web view.
+- Stop: Ctrl+C in each terminal; wait for ">>> Simulated G1 stopped." before starting the simulator again.
+- PEP scenarios to show during the run: see DEMO_PEP.md.

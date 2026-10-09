@@ -836,7 +836,7 @@ def camera_server(shared_qpos, port: int, fps: float, jpeg_quality: int, robot: 
     print(f">>> Camera stream on tcp://*:{port} ({len(STREAM_CAMERAS)} cameras at {fps:g} fps).", flush=True)
 
     encode_params = [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality]
-    parent_pid = os.getppid()
+    parent_pid = mp.parent_process().pid  # the simulator, even if it already exited (then the loop ends at once)
     try:
         # Stop if the simulator dies without terminating this process (e.g. a crash).
         while os.getppid() == parent_pid:
@@ -1054,7 +1054,7 @@ def web_server(shared_qpos, shared_status, shared_reset, host: str, port: int, f
     server = ThreadingHTTPServer((host, port), Handler)
     server.daemon_threads = True
     print(f">>> Web view on http://{host}:{port} ({fps:g} fps).", flush=True)
-    parent_pid = os.getppid()
+    parent_pid = mp.parent_process().pid  # the simulator, even if it already exited (then the loop ends at once)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     try:
         # Stop if the simulator dies without terminating this process (e.g. a crash).
@@ -1181,6 +1181,12 @@ def main():
         web_process.start()
 
     viewer = None
+    if not args.headless and not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        # No screen (e.g. a server): the viewer window cannot open and would stop the whole simulator, leaving the
+        # client waiting for DDS forever. Run headless instead; --web_port still shows the scene in a browser.
+        print(">>> No display found: running headless (no MuJoCo window). Use --web_port to watch in a browser.",
+              flush=True)
+        args.headless = True
     if not args.headless:
         if not args.dark_view:
             # Colours and lights only: the camera process has its own model, physics is unaffected.
