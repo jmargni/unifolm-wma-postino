@@ -394,7 +394,7 @@ control how those actions are executed.
 | --- | --- | --- |
 | `--language_instruction` | `"Pack black camera into box"` | The text command sent to the model server. |
 | `--robot_type` | `g1_dex1` | Robot embodiment. Only `g1_dex1` works with the mock robot and the simulator. |
-| `--control_freq` | `30` | Actions executed per second (Hz). |
+| `--control_freq` | `30` | Actions executed per second (Hz). Use **15** with the model and the replay server: see *Choosing `--control_freq`* below. |
 | `--action_horizon` | `16` | How many of the predicted future actions to keep (max 16). |
 | `--exe_steps` | `16` | How many of those to execute before asking the server again. Must be ≤ `--action_horizon`. |
 | `--observation_horizon` | `2` | How many recent frames/states are sent to the server. |
@@ -429,6 +429,39 @@ Slow the robot down to 10 actions per second:
 ```bash
 python robot_client.py --control_freq 10
 ```
+
+### Choosing `--control_freq`
+
+`--control_freq` sets how fast the client **plays** the actions it receives:
+one action every `1 / control_freq` seconds. It does not add, drop or
+interpolate actions, so it sets the robot's speed, not its smoothness.
+
+The actions only make sense at one speed. UnifoLM-WMA was trained on
+recordings sampled at 15 actions per second (30 fps video, every second
+frame), so consecutive actions are 1/15 s of real motion apart; the replay
+server serves its recording with the same spacing (`--stride 2`). Use
+**`--control_freq 15`** with both: each step then takes as long as when it was
+recorded, and the robot moves at the recorded speed.
+
+- **Higher (e.g. 30): the same motion, faster.** Each step meant for 1/15 s is
+  done in 1/30 s, so the robot moves twice as fast, not more smoothly. With
+  the PEP (`--pep_url`) this shows up as denied chunks: the PEP measures speed
+  as each step's angle over `1 / control_freq`, so the cover episode's fastest
+  step, about 2.6 rad/s at 15, becomes about 5.3 rad/s, above its 3.0 rad/s
+  limit (DENY G1D-102). A denied chunk is dropped and the client asks again,
+  so the robot moves in fast bursts with pauses: stop-and-go, not skipped
+  steps.
+- **Lower (e.g. 10): slow motion.** The PEP allows everything, but the robot
+  is slower than the model expects, and the model then sees camera images
+  later in the motion than it was trained on.
+- **Smoothness** comes from the arm controller under the client, which moves
+  between consecutive targets on its own, updating the motors 500 times a
+  second; it is the same at any `--control_freq`.
+
+The one case for another value: the replay server with `--stride 1` serves
+the recording's full 30 actions per second, and `--control_freq 30` then
+plays it at the same real speed in finer steps. The real model only produces
+15 per second, so with it 15 is the only right value.
 
 See all options:
 
