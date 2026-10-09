@@ -252,8 +252,10 @@ class ImageClientCamera:
                 tv_img_shm_name=self.tv_img_shm.name,
                 wrist_img_shape=self.wrist_img_shape,
                 wrist_img_shm_name=self.wrist_img_shm.name if self.wrist_img_shm else None,
-                # The robot's image server by default; set UNITREE_IMAGE_SERVER to use another one (e.g. a simulator).
+                # The robot's image server by default; set UNITREE_IMAGE_SERVER (and UNITREE_IMAGE_PORT) to use
+                # another one, e.g. a simulator started with --image_port.
                 server_address=os.environ.get("UNITREE_IMAGE_SERVER", "192.168.123.164"),
+                port=int(os.environ.get("UNITREE_IMAGE_PORT", 5555)),
             )
 
             image_receive_thread = threading.Thread(target=self.img_client.receive_process, daemon=True)
