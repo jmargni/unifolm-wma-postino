@@ -147,7 +147,7 @@ def run_policy(
 
 
 def run_eval(args: argparse.Namespace) -> None:
-    client = LongConnectionClient(BASE_URL)
+    client = LongConnectionClient(args.server_url.rstrip("/"))
 
     pep = None
     if args.pep_url:
@@ -242,6 +242,11 @@ def get_parser() -> argparse.ArgumentParser:
                         type=float,
                         default=30,
                         help="The Low-level control frequency in Hz.")
+    parser.add_argument("--server_url",
+                        type=str,
+                        default=BASE_URL,
+                        help="Model server (real_eval_server.py, replay_policy_server.py or the mock), e.g. "
+                        "http://10.32.55.4:8000. Default: this machine, port 8000 (or an SSH tunnel to it).")
     parser.add_argument("--pep_url",
                         type=str,
                         default=None,

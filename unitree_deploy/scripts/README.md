@@ -393,6 +393,7 @@ control how those actions are executed.
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `--language_instruction` | `"Pack black camera into box"` | The text command sent to the model server. |
+| `--server_url` | `http://127.0.0.1:8000` | Model server address. On another machine: e.g. `http://10.32.55.4:8000`, with the server started on all interfaces (`replay_policy_server.py --host 0.0.0.0`) and its port open. |
 | `--robot_type` | `g1_dex1` | Robot embodiment. Only `g1_dex1` works with the mock robot and the simulator. |
 | `--control_freq` | `30` | Actions executed per second (Hz). Use **15** with the model and the replay server: see *Choosing `--control_freq`* below. |
 | `--action_horizon` | `16` | How many of the predicted future actions to keep (max 16). |
