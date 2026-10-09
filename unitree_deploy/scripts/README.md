@@ -138,7 +138,7 @@ replay server, or let it repeat by itself:
 unchanged:
 
 ```bash
-python sim_g1_robot.py --robot g1d --auto_reset --web_port 8080
+python sim_g1_robot.py --robot g1d --auto_reset --headless --web_port 8080   # drop --headless for the MuJoCo window too
 python replay_policy_server.py --cover --loop
 UNITREE_IMAGE_SERVER=127.0.0.1 python robot_client.py --control_freq 15
 ```
@@ -269,7 +269,7 @@ back where they started. It works without a screen, so the simulator can run on 
 server:
 
 ```bash
-# On the machine running the simulator (--headless if it has no screen)
+# On the machine running the simulator: --headless on a server (with no screen it switches to it by itself)
 python sim_g1_robot.py --robot g1d --headless --web_port 8080
 
 # On your laptop, if the simulator runs on a server: tunnel the port, leave it open
@@ -324,9 +324,9 @@ and the web page are brighter.
 | --- | --- |
 | `PEP start pose: DENY G1D-107 ... arm richiesto` | normal: arm the robot on :3000 |
 | `PEP start pose: UNREACHABLE ...` | the twin is not running, or `--pep_url` is wrong |
-| `[G1_29_ArmController] Waiting to subscribe dds...` | the simulator is not running |
+| `[G1_29_ArmController] Waiting to subscribe dds...` | the simulator is not running, or it stopped at start-up: check its terminal (e.g. `could not initialize GLFW`: no usable screen, start it with `--headless`) |
 | `An error occurred: ... Connection refused` (repeated) | no model on port 8000: start the mock or the tunnel |
-| Simulator: `ZMQError: Address already in use (addr='tcp://*:5555')` | another program uses port 5555: give the simulator a free port, `--image_port 5556`, and the client the same one, `UNITREE_IMAGE_PORT=5556` (next to `UNITREE_IMAGE_SERVER`) |
+| Simulator: `ZMQError: Address already in use (addr='tcp://*:5555')` | another program uses port 5555: give the simulator a free port, `--image_port 5560`, and the client the same one, `UNITREE_IMAGE_PORT=5560` (next to `UNITREE_IMAGE_SERVER`). The Cyber Twin's camera service uses 5555, 5556 and 5557 |
 
 ## 1. Start everything
 
@@ -513,7 +513,7 @@ Expected output: `ok 16 actions of 16 values`, followed by the first action.
 | Client loops on `[G1_29_ArmController] Waiting to subscribe dds...` | No robot state is arriving. | Start `mock_g1_robot.py` (or `sim_g1_robot.py`) first. If it is running, check that both use the same network interface (`--network_interface`). |
 | Client prints `An error occurred: ... Connection refused` repeatedly | The model server is not running. | Start `mock_policy_server.py`. The client retries on its own. |
 | `OSError: [Errno 98] Address already in use` in the server | Port 8000 is taken (often an old server). | Stop the other program or use `--port`. |
-| MuJoCo window does not open / GLFW error | No display available. | Use `python mock_g1_robot.py --headless` (or `sim_g1_robot.py --headless`). |
+| MuJoCo window does not open / GLFW error | No display available. | `sim_g1_robot.py` switches to headless by itself when no display is set; if one is set but unusable (e.g. over SSH), pass `--headless`. For the mock: `python mock_g1_robot.py --headless`. |
 | `ModuleNotFoundError: unitree_deploy` or `unitree_sdk2py` | Wrong Python environment. | `conda activate unitree_deploy`. |
 | `ZMQError: Address already in use (addr='tcp://*:5555')` in `sim_g1_robot.py` | An old simulator is still streaming. | Stop it (`pkill -f sim_g1_robot`), or use `--image_port` (the client always connects to 5555). |
 | The model server says `all black` with `sim_g1_robot.py` | The client is not reading the simulator's cameras. | Start the client with `UNITREE_IMAGE_SERVER=127.0.0.1`. |

@@ -15,7 +15,7 @@ Setup B from the README, with the replay server looping so the task repeats on
 its own. Three terminals in `unitree_deploy/scripts`:
 
 ```bash
-python sim_g1_robot.py --robot g1d --twin_url http://127.0.0.1:3000 --auto_reset --web_port 8080
+python sim_g1_robot.py --robot g1d --twin_url http://127.0.0.1:3000 --auto_reset --headless --web_port 8080
 python replay_policy_server.py --cover --loop
 cd ~/projects/DGS-CyberTwin-G1D && python server.py        # the twin (PEP + consoles)
 UNITREE_IMAGE_SERVER=127.0.0.1 python robot_client.py --control_freq 15 --pep_url http://127.0.0.1:3000
@@ -24,9 +24,13 @@ UNITREE_IMAGE_SERVER=127.0.0.1 python robot_client.py --control_freq 15 --pep_ur
 > On a shared server where port 5555 is taken, add `--image_port 5560` to the
 > simulator and `UNITREE_IMAGE_PORT=5560` to the client (see the README).
 
+`--headless`: on the demo server there is no screen for the MuJoCo window (without
+it the simulator would stop at start-up and the postino would wait at
+`Waiting to subscribe dds...`); the robot is shown in the web view instead.
+
 Two browser windows, side by side:
 
-- **The robot** — the MuJoCo window, or `http://localhost:8080` (the web view).
+- **The robot** — the web view, `http://<server>:8080`.
 - **The twin console** — `http://localhost:3000`. Use its left nav to switch
   between *Digital twin* (robot controls), *Defense* (policy, identities),
   *SIEM & audit* (the decision log) and *Test harness*.
